@@ -310,16 +310,26 @@ class ModelClient:
 
             for attempt in range(1, max_attempts + 1):
                 try:
-                    async for chunk in self._provider.chat_stream(
+                    stream = self._provider.chat_stream(
                         model=call_model,
                         messages=messages,
                         tools=tools,
                         options=call_options,
                         extra_body=extra_body,
                         **kwargs,
-                    ):  # type: ignore
+                    ).__aiter__()  # type: ignore
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(
+                                anext(stream),
+                                timeout=self.config.timeout,
+                            )
+                        except StopAsyncIteration:
+                            break
                         yield chunk
                     break
+                except asyncio.TimeoutError:
+                    raise
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -353,7 +363,15 @@ class ModelClient:
             error_msg = f"流式调用超时 ({self.config.timeout}s)"
             logger.error(error_msg)
             self._publish_error(
-                ModelError(error_msg), {"context": "chat_stream", "timeout": self.config.timeout}
+                ModelError(error_msg),
+                {
+                    "context": "chat_stream",
+                    "timeout": self.config.timeout,
+                    "message_count": len(messages),
+                    "provider": self.config.provider,
+                    "model": call_model,
+                    "endpoint": getattr(self._provider, "endpoint", None),
+                },
             )
             raise ModelError(error_msg)
 

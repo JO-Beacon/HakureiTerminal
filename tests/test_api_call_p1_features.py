@@ -72,6 +72,23 @@ class _FakeOpenAIClient:
         self.models = _FakeModelsClient()
 
 
+class _SlowFirstChunkProvider(BaseProvider):
+    async def chat(self, model: str, messages: list[dict], tools=None, options=None, **kwargs):
+        raise NotImplementedError
+
+    async def chat_stream(self, model: str, messages: list[dict], tools=None, options=None, **kwargs):
+        await asyncio.sleep(0.05)
+        yield StreamChunk(content="late")
+
+
+class _CollectingEventBus:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, event):
+        self.events.append(event)
+
+
 class P1ApiCallFeatureTests(unittest.TestCase):
     def test_stream_chunk_new_fields_are_optional_and_settable(self):
         chunk = StreamChunk(type="finish", status="done", usage={"total_tokens": 3}, finish_reason="stop")
@@ -163,6 +180,81 @@ class P1ApiCallFeatureTests(unittest.TestCase):
         self.assertEqual(chunks[0].status, "retrying")
         self.assertEqual(chunks[1].content, "ok")
 
+
+    def test_stream_timeout_publishes_structured_event(self):
+        event_bus = _CollectingEventBus()
+        client = ModelClient.__new__(ModelClient)
+        client.config = ModelConfig(provider="test", name="test", timeout=0.01, retry_max_attempts=1)
+        client._provider = _SlowFirstChunkProvider(client.config)
+        client._event_bus = event_bus
+
+        async def collect():
+            return [chunk async for chunk in client.chat_stream([{"role": "user", "content": "hi"}])]
+
+        with self.assertRaises(Exception):
+            asyncio.run(collect())
+
+        self.assertTrue(event_bus.events)
+        data = event_bus.events[-1].data
+        self.assertEqual(data["context"], "chat_stream")
+        self.assertEqual(data["timeout"], 0.01)
+        self.assertEqual(data["message_count"], 1)
+        self.assertEqual(data["provider"], "test")
+        self.assertEqual(data["model"], "test")
+
+    def test_claude_list_models_returns_configured_fallback(self):
+        provider = ClaudeProvider.__new__(ClaudeProvider)
+        BaseProvider.__init__(provider, ModelConfig(provider="claude", name="claude-test"))
+
+        models = asyncio.run(provider.list_models())
+
+        self.assertEqual(len(models), 1)
+        self.assertEqual(models[0].id, "claude-test")
+        self.assertEqual(models[0].metadata, {"fallback": True})
+        self.assertIn(ProviderCapability.REASONING, models[0].capabilities)
+
+    def test_claude_stream_tool_call_preserves_raw_arguments_on_json_error(self):
+        class _FakeClaudeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def __aiter__(self):
+                async def stream():
+                    yield SimpleNamespace(
+                        type="content_block_start",
+                        index=0,
+                        content_block=SimpleNamespace(
+                            type="tool_use",
+                            id="tool-1",
+                            name="broken_tool",
+                        ),
+                    )
+                    yield SimpleNamespace(
+                        type="content_block_delta",
+                        index=0,
+                        delta=SimpleNamespace(type="input_json_delta", partial_json='{"bad"'),
+                    )
+                    yield SimpleNamespace(type="message_stop")
+
+                return stream()
+
+        class _FakeClaudeMessages:
+            def stream(self, **kwargs):
+                return _FakeClaudeStream()
+
+        provider = ClaudeProvider.__new__(ClaudeProvider)
+        BaseProvider.__init__(provider, ModelConfig(provider="claude", name="test"))
+        provider._client = SimpleNamespace(messages=_FakeClaudeMessages())
+
+        async def collect():
+            return [chunk async for chunk in provider.chat_stream("test", [{"role": "user", "content": "hi"}])]
+
+        chunks = asyncio.run(collect())
+        self.assertEqual(chunks[0].type, "tool_call")
+        self.assertEqual(chunks[0].tool_info["raw_arguments"], {0: '{"bad"'})
 
     def test_openai_stream_tool_call_preserves_raw_arguments_on_json_error(self):
         class _FakeChatCompletions:

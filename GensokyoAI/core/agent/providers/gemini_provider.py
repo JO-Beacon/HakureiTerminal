@@ -143,30 +143,34 @@ class GeminiProvider(BaseProvider):
                 continue
 
             candidate = chunk.candidates[0]
-            if not candidate.content or not candidate.content.parts:
-                continue
-
-            for part in candidate.content.parts:
-                if hasattr(part, "text") and part.text:
-                    yield StreamChunk(content=part.text)
-                elif hasattr(part, "function_call") and part.function_call:
-                    fc = part.function_call
-                    unified_msg = UnifiedMessage(
-                        role="assistant",
-                        content="",
-                        tool_calls=[
-                            ToolCall(
-                                function=ToolCallFunction(
-                                    name=fc.name,
-                                    arguments=dict(fc.args) if fc.args else {},
+            if candidate.content and candidate.content.parts:
+                for part in candidate.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        yield StreamChunk(content=part.text)
+                    elif hasattr(part, "function_call") and part.function_call:
+                        fc = part.function_call
+                        unified_msg = UnifiedMessage(
+                            role="assistant",
+                            content="",
+                            tool_calls=[
+                                ToolCall(
+                                    function=ToolCallFunction(
+                                        name=fc.name,
+                                        arguments=dict(fc.args) if fc.args else {},
+                                    )
                                 )
-                            )
-                        ],
-                    )
-                    yield StreamChunk(
-                        is_tool_call=True,
-                        tool_info={"message": unified_msg},
-                    )
+                            ],
+                        )
+                        yield StreamChunk(
+                            type="tool_call",
+                            is_tool_call=True,
+                            tool_info={"message": unified_msg},
+                            finish_reason="tool_calls",
+                        )
+
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason:
+                yield StreamChunk(type="finish", finish_reason=str(finish_reason))
 
     async def list_models(self) -> list[ModelInfo]:
         """列出 Gemini 模型。"""

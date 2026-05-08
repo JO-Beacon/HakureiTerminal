@@ -131,11 +131,20 @@ class OllamaProvider(BaseProvider):
                     tool_calls=tool_calls,
                 )
                 yield StreamChunk(
+                    type="tool_call",
                     is_tool_call=True,
                     tool_info={"message": unified_msg},
+                    finish_reason="tool_calls",
                 )
             elif message.content:
                 yield StreamChunk(content=message.content)
+
+            done = bool(getattr(chunk, "done", False))
+            if done:
+                yield StreamChunk(
+                    type="finish",
+                    finish_reason=getattr(chunk, "done_reason", None) or "stop",
+                )
 
     async def list_models(self) -> list[ModelInfo]:
         """列出本地 Ollama 模型。"""

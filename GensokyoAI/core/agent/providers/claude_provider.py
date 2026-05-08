@@ -192,6 +192,7 @@ class ClaudeProvider(BaseProvider):
                                 )
                             except json.JSONDecodeError:
                                 args = {}
+                                tool_data["raw_arguments"] = tool_data["input_json"]
 
                             unified_tool_calls.append(
                                 ToolCall(
@@ -210,13 +211,21 @@ class ClaudeProvider(BaseProvider):
                             content="",
                             tool_calls=unified_tool_calls,
                         )
+                        tool_info = {
+                            "message": unified_msg,
+                            "thinking": "".join(thinking_parts) if thinking_parts else None,
+                        }
+                        raw_arguments = {
+                            index: tool_data["raw_arguments"]
+                            for index, tool_data in sorted(tool_blocks.items())
+                            if "raw_arguments" in tool_data
+                        }
+                        if raw_arguments:
+                            tool_info["raw_arguments"] = raw_arguments
                         yield StreamChunk(
                             type="tool_call",
                             is_tool_call=True,
-                            tool_info={
-                                "message": unified_msg,
-                                "thinking": "".join(thinking_parts) if thinking_parts else None,
-                            },
+                            tool_info=tool_info,
                             finish_reason="tool_use",
                         )
                     elif event.type == "message_stop":
