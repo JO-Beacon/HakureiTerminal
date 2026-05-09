@@ -56,9 +56,18 @@ class SystemEvent(Enum):
     MEMORY_SEMANTIC_RECALLED_RESPONSE = "memory.semantic.recalled.response"
 
     # 工具事件
+    TOOL_CALL_SELECTED = "tool.call.selected"
     TOOL_CALL_STARTED = "tool.call.started"
+    TOOL_CALL_PROGRESS = "tool.call.progress"
     TOOL_CALL_COMPLETED = "tool.call.completed"
     TOOL_CALL_FAILED = "tool.call.failed"
+
+    # 外部工具源生命周期事件
+    EXTERNAL_TOOL_STARTING = "external_tool.starting"
+    EXTERNAL_TOOL_RUNNING = "external_tool.running"
+    EXTERNAL_TOOL_STOPPING = "external_tool.stopping"
+    EXTERNAL_TOOL_FAILED = "external_tool.failed"
+    EXTERNAL_TOOL_RECONNECTING = "external_tool.reconnecting"
 
     # 持久化事件
     PERSISTENCE_SAVE_STARTED = "persistence.save.started"
@@ -70,10 +79,22 @@ class SystemEvent(Enum):
     MODEL_ERROR = "error.model"
     TOOL_ERROR = "error.tool"
 
+    # 模型观测事件
+    MODEL_CALL_TIMING = "model.call.timing"
+    MODEL_AUTH = "model.auth"
+    MODEL_REQUEST_STARTED = "model.request_started"
+    MODEL_RETRY_SCHEDULED = "model.retry_scheduled"
+    MODEL_FIRST_TOKEN = "model.first_token"
+    MODEL_COMPLETED = "model.completed"
+    MODEL_FAILED = "model.failed"
+
     # 后台任务事件
     BACKGROUND_TASK_SUBMITTED = "background.task.submitted"
     BACKGROUND_TASK_COMPLETED = "background.task.completed"
     BACKGROUND_TASK_FAILED = "background.task.failed"
+    BACKGROUND_WORKER_STARTED = "background.worker.started"
+    BACKGROUND_WORKER_IDLE = "background.worker.idle"
+    BACKGROUND_WORKER_FAILED = "background.worker.failed"
 
     # 思考引擎事件
     THINK_ENGINE_THOUGHT = "think.engine.thought"  # 静默思考完成

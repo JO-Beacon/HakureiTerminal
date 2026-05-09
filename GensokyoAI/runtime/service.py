@@ -16,10 +16,13 @@ from typing import Any
 import yaml
 
 from GensokyoAI.core.agent import Agent
+from GensokyoAI.core.agent.model_registry import ModelRegistryService
+from GensokyoAI.core.agent.types import ModelInfo
 from GensokyoAI.core.config import ConfigLoader
 from GensokyoAI.runtime.dependencies import dependency_status, install_dependencies
 from GensokyoAI.runtime.rpc import dispatch_rpc, legacy_rpc_methods, rpc_methods
 from GensokyoAI.session.context import SessionContext
+from GensokyoAI.tools.external_manager import ExternalToolManager
 
 
 @dataclass(slots=True)
@@ -44,9 +47,17 @@ class RuntimeService:
     def __init__(self, root_dir: Path | None = None) -> None:
         self.state = RuntimeState(root_dir=(root_dir or Path.cwd()).resolve())
         self._lock = asyncio.Lock()
+        self._model_registry = ModelRegistryService()
+        self.external_tool_manager = ExternalToolManager()
 
-    async def handle(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        return await dispatch_rpc(self, method, params)
+    async def handle(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        structured_errors: bool = True,
+    ) -> Any:
+        return await dispatch_rpc(self, method, params, structured_errors=structured_errors)
 
     async def health(self) -> dict[str, Any]:
         """Return a lightweight runtime health payload."""
@@ -66,6 +77,7 @@ class RuntimeService:
             "protocol": "json-lines-rpc",
             "methods": rpc_methods(),
             "legacy_methods": legacy_rpc_methods(),
+            "external_tools": self.external_tool_manager.source_status(include_tools=False),
         }
 
     async def init(
@@ -171,6 +183,46 @@ class RuntimeService:
                     )
         return characters
 
+    async def list_models(
+        self,
+        refresh: bool = False,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return current runtime model metadata through ModelRegistryService."""
+        agent = self._require_agent()
+        config = agent.config.model
+        models = await self._model_registry.list_models(
+            config,
+            refresh=refresh,
+            overrides=overrides,
+        )
+        return {
+            "provider": config.provider,
+            "model": config.name,
+            "models": [self._model_payload(model) for model in models],
+        }
+
+    async def model_info(
+        self,
+        model_id: str | None = None,
+        refresh: bool = False,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return metadata for one model in the current runtime provider."""
+        agent = self._require_agent()
+        config = agent.config.model
+        model = await self._model_registry.get_model_info(
+            config,
+            model_id=model_id,
+            refresh=refresh,
+            overrides=overrides,
+        )
+        return {
+            "provider": config.provider,
+            "requested_model": model_id or config.name,
+            "model": self._model_payload(model),
+        }
+
     async def create_session(self) -> dict[str, Any]:
         agent = self._require_agent()
         async with self._lock:
@@ -224,6 +276,11 @@ class RuntimeService:
         """Install whitelisted optional Provider dependencies."""
 
         return install_dependencies(providers, scope=scope, timeout=timeout)
+
+    async def external_tool_status(self, include_tools: bool = True) -> dict[str, Any]:
+        """Return external tool source status without exposing transport details."""
+
+        return self.external_tool_manager.source_status(include_tools=include_tools)
 
     async def shutdown(self) -> dict[str, Any]:
         async with self._lock:
@@ -323,6 +380,17 @@ class RuntimeService:
             if key not in allowed or value == "":
                 continue
             setattr(target, key, value)
+
+    @staticmethod
+    def _model_payload(model: ModelInfo) -> dict[str, Any]:
+        return {
+            "id": model.id,
+            "name": model.name,
+            "context_window": model.context_window,
+            "capabilities": list(model.capabilities),
+            "owned_by": model.owned_by,
+            "metadata": dict(model.metadata),
+        }
 
     @staticmethod
     def _session_payload(session: SessionContext | None) -> dict[str, Any]:

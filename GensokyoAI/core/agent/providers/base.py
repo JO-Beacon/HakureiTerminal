@@ -5,10 +5,19 @@
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, TYPE_CHECKING
 
+from .auth_utils import TokenRefreshManager
+from .request_utils import merge_headers
 from ..types import ProviderCapability
 
 if TYPE_CHECKING:
-    from ..types import UnifiedResponse, UnifiedEmbeddingResponse, StreamChunk, ModelInfo
+    from ..types import (
+        ImageGenerationRequest,
+        ImageGenerationResult,
+        ModelInfo,
+        StreamChunk,
+        UnifiedEmbeddingResponse,
+        UnifiedResponse,
+    )
     from ...config import ModelConfig
 
 
@@ -23,6 +32,7 @@ class BaseProvider(ABC):
 
     def __init__(self, config: "ModelConfig"):
         self.config = config
+        self._token_manager = TokenRefreshManager(config.auth) if config.auth else None
 
     @property
     def capabilities(self) -> set[str]:
@@ -33,9 +43,39 @@ class BaseProvider(ABC):
         """检查 Provider 是否声明支持指定能力。"""
         return capability in self.capabilities
 
+    def apply_model_capability_overrides(self, capabilities: set[str]) -> set[str]:
+        """应用配置中的模型能力增删覆盖，修正远端元数据或启发式推断误差。"""
+        result = set(capabilities)
+        result.update(self.config.model_capabilities_add or [])
+        result.difference_update(self.config.model_capabilities_remove or [])
+        return result
+
     async def list_models(self) -> list["ModelInfo"]:
         """列出 Provider 可用模型；默认无远程模型列表。"""
         return []
+
+    async def prepare_auth(self, *, force_refresh: bool = False) -> None:
+        """准备认证信息；默认支持 OAuth/Bearer token refresh。"""
+        if self._token_manager:
+            before = self.config.auth.access_token if self.config.auth else None
+            await self._token_manager.ensure_token(force=force_refresh)
+            after = self.config.auth.access_token if self.config.auth else None
+            if after and after != before:
+                self._rebuild_auth_client()
+
+    def _rebuild_auth_client(self) -> None:
+        """认证 token 刷新后重建底层客户端；需要的 Provider 可覆写。"""
+        return None
+
+    def auth_headers(self) -> dict[str, str]:
+        """返回当前 Provider 可用的认证 headers。"""
+        if not self._token_manager:
+            return {}
+        return self._token_manager.auth_headers()
+
+    def merged_headers(self, *headers: dict | None) -> dict[str, str]:
+        """合并配置 headers 与动态认证 headers。"""
+        return merge_headers(self.config.extra_headers, self.auth_headers(), *headers)
 
     @abstractmethod
     async def chat(
@@ -85,6 +125,14 @@ class BaseProvider(ABC):
         """
         ...
 
+    async def image_generation(
+        self,
+        request: "ImageGenerationRequest",
+        **kwargs,
+    ) -> "ImageGenerationResult":
+        """图片生成；默认不支持。"""
+        raise NotImplementedError(f"{self.__class__.__name__} 不支持 image_generation")
+
     async def embeddings(
         self,
         model: str,
@@ -110,3 +158,4 @@ class BaseProvider(ABC):
     def update_config(self, config: "ModelConfig") -> None:
         """更新配置"""
         self.config = config
+        self._token_manager = TokenRefreshManager(config.auth) if config.auth else None

@@ -6,7 +6,8 @@ from GensokyoAI.core.agent.model_client import ModelClient
 from GensokyoAI.core.agent.providers import ProviderFactory
 from GensokyoAI.core.agent.providers.base import BaseProvider
 from GensokyoAI.core.agent.types import ProviderCapability, UnifiedEmbeddingResponse
-from GensokyoAI.core.config import EmbeddingConfig, ModelConfig
+from GensokyoAI.core.config import AuthConfig, EmbeddingConfig, ModelConfig
+from GensokyoAI.core.events import SystemEvent
 from GensokyoAI.core.exceptions import ModelError
 
 
@@ -110,6 +111,30 @@ class FailingEmbeddingProvider(BaseProvider):
         raise error
 
 
+class OAuth401Provider(BaseProvider):
+    calls = 0
+    refreshed = False
+
+    async def chat(self, model: str, messages: list[dict], tools=None, options=None, **kwargs):
+        self.__class__.calls += 1
+        if not self.__class__.refreshed:
+            error = RuntimeError("unauthorized")
+            error.status_code = 401
+            error.response_body = "expired"
+            raise error
+        return SimpleNamespace(message=SimpleNamespace(content="oauth ok"), model=model, done=True)
+
+    async def chat_stream(self, model: str, messages: list[dict], tools=None, options=None, **kwargs):
+        if False:
+            yield None
+
+    async def prepare_auth(self, *, force_refresh: bool = False) -> None:
+        if force_refresh:
+            self.__class__.refreshed = True
+            return
+        await super().prepare_auth(force_refresh=force_refresh)
+
+
 class _CollectingEventBus:
     def __init__(self):
         self.events = []
@@ -126,6 +151,7 @@ class ModelClientRetryTests(unittest.TestCase):
         ProviderFactory.register("retryable_429_test", Retryable429Provider)
         ProviderFactory.register("retryable_embedding_test", RetryableEmbeddingProvider)
         ProviderFactory.register("failing_embedding_test", FailingEmbeddingProvider)
+        ProviderFactory.register("oauth_401_test", OAuth401Provider)
 
     def test_retries_5xx_and_succeeds(self):
         RetryableProvider.calls = 0
@@ -218,6 +244,30 @@ class ModelClientRetryTests(unittest.TestCase):
         self.assertEqual(data["prompt_length"], 5)
         self.assertEqual(data["provider"], "failing_embedding_test")
         self.assertEqual(data["model"], "embed-model")
+
+
+    def test_oauth_401_refreshes_once_and_retries(self):
+        OAuth401Provider.calls = 0
+        OAuth401Provider.refreshed = False
+        event_bus = _CollectingEventBus()
+        client = ModelClient(
+            ModelConfig(
+                provider="oauth_401_test",
+                name="test-model",
+                retry_max_attempts=1,
+                retry_initial_delay=0,
+                auth=AuthConfig(auth_type="bearer", access_token="old-token"),
+            ),
+            event_bus=event_bus,
+        )
+
+        response = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+
+        self.assertEqual(response.message.content, "oauth ok")
+        self.assertEqual(OAuth401Provider.calls, 2)
+        auth_events = [e for e in event_bus.events if e.type == SystemEvent.MODEL_AUTH]
+        self.assertTrue(auth_events)
+        self.assertIn("token_refresh_completed", [e.data["status"] for e in auth_events])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from typing import Any, Iterable, Literal
 OPTIONAL_PROVIDER_DEPENDENCIES: dict[str, list[str]] = {
     "ollama": ["ollama"],
     "openai": ["openai>=1.0.0"],
+    "openrouter": ["openai>=1.0.0"],
     "deepseek": ["openai>=1.0.0"],
     "openai_responses": ["openai>=1.0.0"],
     "claude": ["anthropic>=0.20.0"],
@@ -26,6 +27,7 @@ OPTIONAL_PROVIDER_DEPENDENCIES: dict[str, list[str]] = {
 PROVIDER_IMPORTS: dict[str, list[str]] = {
     "ollama": ["ollama"],
     "openai": ["openai"],
+    "openrouter": ["openai"],
     "deepseek": ["openai"],
     "openai_responses": ["openai"],
     "claude": ["anthropic"],

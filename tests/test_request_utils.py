@@ -1,9 +1,11 @@
 import unittest
 
 from GensokyoAI.core.agent.providers.request_utils import (
+    ModelAPIError,
     is_html_response,
     normalize_openai_api_host_and_path,
     normalize_openai_responses_host_and_path,
+    post_sse,
     sanitize_response_body,
 )
 
@@ -30,9 +32,11 @@ class RequestUtilsTests(unittest.TestCase):
         self.assertEqual(endpoint.api_path, "/chat/completions")
 
     def test_normalize_openrouter(self):
-        endpoint = normalize_openai_api_host_and_path("openrouter.ai/api")
-        self.assertEqual(endpoint.api_host, "https://openrouter.ai/api/v1")
-        self.assertEqual(endpoint.api_path, "/chat/completions")
+        for host in ("openrouter.ai", "openrouter.ai/api", "https://openrouter.ai/api/v1"):
+            with self.subTest(host=host):
+                endpoint = normalize_openai_api_host_and_path(host)
+                self.assertEqual(endpoint.api_host, "https://openrouter.ai/api/v1")
+                self.assertEqual(endpoint.api_path, "/chat/completions")
 
     def test_normalize_custom_api_path(self):
         endpoint = normalize_openai_api_host_and_path("proxy.example.com", "custom/path")
@@ -43,6 +47,43 @@ class RequestUtilsTests(unittest.TestCase):
         endpoint = normalize_openai_responses_host_and_path("https://api.openai.com")
         self.assertEqual(endpoint.api_host, "https://api.openai.com/v1")
         self.assertEqual(endpoint.api_path, "/responses")
+
+
+    def test_post_sse_reports_invalid_json_with_event_diagnostics(self):
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                return iter(
+                    [
+                        b": keepalive\n",
+                        b"event: message\n",
+                        b"data: {bad json}\n",
+                        b"\n",
+                    ]
+                )
+
+        with unittest.mock.patch(
+            "GensokyoAI.core.agent.providers.request_utils.urlopen",
+            return_value=_FakeResponse(),
+        ):
+            async def collect():
+                async for _ in post_sse("https://api.example.test/sse", {}, {}, 1):
+                    pass
+
+            with self.assertRaises(ModelAPIError) as cm:
+                import asyncio
+
+                asyncio.run(collect())
+
+        self.assertIn("SSE JSON 解析失败", str(cm.exception))
+        self.assertIn("event_index=1", str(cm.exception))
+        self.assertIn("ignored_lines=1", str(cm.exception))
+        self.assertEqual(cm.exception.response_body, "{bad json}")
 
 
 if __name__ == "__main__":

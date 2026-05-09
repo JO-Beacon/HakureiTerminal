@@ -14,16 +14,22 @@
 # GensokyoAI/core/agent/providers/openai_responses_provider.py
 
 import json
-from typing import AsyncIterator, TYPE_CHECKING
+from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import BaseProvider
+from .openai_provider import OpenAIProvider
 from .request_utils import (
     ModelAPIError,
+    endpoint_url,
+    has_arbitrary_api_path,
     merge_headers,
     normalize_openai_responses_host_and_path,
+    post_json,
+    post_sse,
     sdk_base_url_for_endpoint,
 )
 from ..types import (
+    ImageInput,
     UnifiedResponse,
     UnifiedMessage,
     UnifiedEmbeddingResponse,
@@ -32,6 +38,8 @@ from ..types import (
     ToolCallFunction,
     ProviderCapability,
     ModelInfo,
+    WebSearchDiagnostics,
+    WebSearchReference,
 )
 from ....utils.logger import logger
 
@@ -64,15 +72,31 @@ class OpenAIResponsesProvider(BaseProvider):
             ProviderCapability.STREAM,
             ProviderCapability.TOOLS,
             ProviderCapability.EMBEDDINGS,
+            ProviderCapability.VISION,
             ProviderCapability.REASONING,
             ProviderCapability.RESPONSES_API,
             ProviderCapability.CUSTOM_ENDPOINT,
+            ProviderCapability.WEB_SEARCH,
         }
 
     @property
     def endpoint(self) -> str:
         """当前 Provider 的规范化 API endpoint。"""
         return f"{self._endpoint.api_host}{self._endpoint.api_path}"
+
+    def _uses_custom_http(self) -> bool:
+        """当前 api_path 是否需要绕过 SDK 固定 resource path。"""
+        endpoint = getattr(self, "_endpoint", None)
+        if endpoint is None:
+            return False
+        return has_arbitrary_api_path(endpoint, "/responses")
+
+    def _request_headers(self) -> dict[str, str]:
+        """构建自定义 HTTP 调用 headers。"""
+        headers = self.merged_headers()
+        if self.config.api_key:
+            headers.setdefault("Authorization", f"Bearer {self.config.api_key}")
+        return headers
 
     def _build_client(self):
         """构建 OpenAI 异步客户端"""
@@ -92,8 +116,9 @@ class OpenAIResponsesProvider(BaseProvider):
         if self.config.api_key:
             kwargs["api_key"] = self.config.api_key
         kwargs["base_url"] = sdk_base_url_for_endpoint(self._endpoint, "/responses")
-        if self.config.extra_headers:
-            kwargs["default_headers"] = merge_headers(self.config.extra_headers)
+        default_headers = self.merged_headers()
+        if default_headers:
+            kwargs["default_headers"] = default_headers
 
         return AsyncOpenAI(**kwargs)
 
@@ -138,8 +163,10 @@ class OpenAIResponsesProvider(BaseProvider):
             call_kwargs["max_output_tokens"] = max_tokens
 
         # 工具支持
-        if tools:
-            call_kwargs["tools"] = self._convert_tools_to_responses(tools)
+        converted_tools = self._convert_tools_to_responses(tools) if tools else []
+        self._inject_web_search_tool(converted_tools, options)
+        if converted_tools:
+            call_kwargs["tools"] = converted_tools
             if tool_choice := options.get("tool_choice"):
                 call_kwargs["tool_choice"] = tool_choice
 
@@ -149,6 +176,15 @@ class OpenAIResponsesProvider(BaseProvider):
 
         # store 配置（默认不存储，因为项目自己管理对话状态）
         call_kwargs["store"] = options.get("store", False)
+
+        if self._uses_custom_http():
+            response = await post_json(
+                endpoint_url(self._endpoint),
+                call_kwargs,
+                self._request_headers(),
+                self.config.timeout,
+            )
+            return self._convert_response_dict(response)
 
         response = await self._client.responses.create(**call_kwargs)
 
@@ -164,7 +200,7 @@ class OpenAIResponsesProvider(BaseProvider):
                 ModelInfo(
                     id=self.config.name,
                     name=self.config.name,
-                    capabilities=sorted(self.capabilities),
+                    capabilities=sorted(self._infer_model_capabilities(self.config.name, {})),
                     metadata={"fallback": True},
                 )
             ]
@@ -179,12 +215,21 @@ class OpenAIResponsesProvider(BaseProvider):
                 ModelInfo(
                     id=model_id,
                     name=model_id,
-                    capabilities=sorted(self.capabilities),
+                    capabilities=sorted(self._infer_model_capabilities(model_id, metadata)),
                     owned_by=getattr(item, "owned_by", None),
                     metadata=metadata,
                 )
             )
         return models
+
+    def _infer_model_capabilities(self, model_id: str, metadata: dict[str, Any]) -> set[str]:
+        """Responses API 模型默认支持内置工具；结合模型名与 metadata 应用细粒度能力。"""
+        capabilities = set(self.capabilities)
+        normalized_id = model_id.lower()
+        tokens = OpenAIProvider._metadata_capability_tokens(metadata)
+        if OpenAIProvider._metadata_or_model_indicates_web_search(normalized_id, tokens):
+            capabilities.add(ProviderCapability.WEB_SEARCH)
+        return self.apply_model_capability_overrides(capabilities)
 
     async def chat_stream(
         self,
@@ -222,8 +267,10 @@ class OpenAIResponsesProvider(BaseProvider):
         if max_tokens:
             call_kwargs["max_output_tokens"] = max_tokens
 
-        if tools:
-            call_kwargs["tools"] = self._convert_tools_to_responses(tools)
+        converted_tools = self._convert_tools_to_responses(tools) if tools else []
+        self._inject_web_search_tool(converted_tools, options)
+        if converted_tools:
+            call_kwargs["tools"] = converted_tools
             if tool_choice := options.get("tool_choice"):
                 call_kwargs["tool_choice"] = tool_choice
 
@@ -234,6 +281,17 @@ class OpenAIResponsesProvider(BaseProvider):
 
         # 流式工具调用累积器：{output_index: {"call_id": ..., "name": ..., "arguments": ...}}
         tool_calls_acc: dict[int, dict] = {}
+
+        if self._uses_custom_http():
+            async for event_data in post_sse(
+                endpoint_url(self._endpoint),
+                call_kwargs,
+                self._request_headers(),
+                self.config.timeout,
+            ):
+                async for stream_chunk in self._convert_stream_event_dict(event_data, tool_calls_acc, options):
+                    yield stream_chunk
+            return
 
         stream = await self._client.responses.create(**call_kwargs)
 
@@ -317,7 +375,15 @@ class OpenAIResponsesProvider(BaseProvider):
 
                 response = getattr(event, "response", None)
                 usage = self._usage_to_dict(getattr(response, "usage", None))
-                yield StreamChunk(type="finish", finish_reason="completed", usage=usage)
+                references = self._extract_web_search_references(response)
+                diagnostics = self._build_web_search_diagnostics(options, references)
+                yield StreamChunk(
+                    type="finish",
+                    finish_reason="completed",
+                    usage=usage,
+                    web_search_references=references,
+                    web_search_diagnostics=diagnostics,
+                )
 
             elif event_type == "response.failed":
                 response = getattr(event, "response", None)
@@ -383,6 +449,47 @@ class OpenAIResponsesProvider(BaseProvider):
     # ==================== 转换方法 ====================
 
     @staticmethod
+    def _image_to_url(image: ImageInput | dict | Any) -> str:
+        """将统一图片输入转换为 Responses API input_image 可接受的 URL 或 data URL。"""
+        url = image.get("url") if isinstance(image, dict) else getattr(image, "url", None)
+        data = image.get("data") if isinstance(image, dict) else getattr(image, "data", None)
+        mime_type = (
+            image.get("mime_type") if isinstance(image, dict) else getattr(image, "mime_type", None)
+        ) or "image/png"
+        if url:
+            return url
+        if data:
+            return data if str(data).startswith("data:") else f"data:{mime_type};base64,{data}"
+        return ""
+
+    @staticmethod
+    def _convert_content_parts(content: Any) -> Any:
+        """将统一多模态 content parts 转换为 Responses API content blocks。"""
+        if not isinstance(content, list):
+            return content
+
+        converted: list[dict] = []
+        for part in content:
+            part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", "text")
+            if part_type == "text":
+                text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+                if text is not None:
+                    converted.append({"type": "input_text", "text": str(text)})
+                continue
+
+            image = part.get("image") if isinstance(part, dict) else getattr(part, "image", None)
+            if part_type == "image" and image:
+                image_url = OpenAIResponsesProvider._image_to_url(image)
+                if not image_url:
+                    continue
+                block: dict[str, Any] = {"type": "input_image", "image_url": image_url}
+                detail = image.get("detail") if isinstance(image, dict) else getattr(image, "detail", None)
+                if detail:
+                    block["detail"] = detail
+                converted.append(block)
+        return converted
+
+    @staticmethod
     def _convert_messages_to_input(
         messages: list[dict],
     ) -> tuple[str, list[dict]]:
@@ -406,12 +513,17 @@ class OpenAIResponsesProvider(BaseProvider):
 
         for msg in messages:
             role = msg.get("role", "")
-            content = msg.get("content", "")
+            content = OpenAIResponsesProvider._convert_content_parts(msg.get("content", ""))
 
             if role in ("system", "developer"):
                 # 收集所有 system/developer 消息为 instructions
                 if content:
-                    instructions_parts.append(content)
+                    if isinstance(content, list):
+                        instructions_parts.extend(
+                            block.get("text", "") for block in content if block.get("type") == "input_text"
+                        )
+                    else:
+                        instructions_parts.append(str(content))
             elif role == "assistant":
                 input_items.append({"role": "assistant", "content": content})
             elif role == "user":
@@ -422,7 +534,7 @@ class OpenAIResponsesProvider(BaseProvider):
                     {
                         "type": "function_call_output",
                         "call_id": msg.get("tool_call_id", ""),
-                        "output": content,
+                        "output": content if isinstance(content, str) else str(content),
                     }
                 )
             else:
@@ -490,6 +602,7 @@ class OpenAIResponsesProvider(BaseProvider):
         if not full_text and hasattr(response, "output_text") and response.output_text:
             full_text = response.output_text
 
+        references = self._extract_web_search_references(response)
         return UnifiedResponse(
             message=UnifiedMessage(
                 role="assistant",
@@ -499,7 +612,122 @@ class OpenAIResponsesProvider(BaseProvider):
             model=getattr(response, "model", "") or "",
             done=True,
             thinking=thinking,
+            web_search_references=references,
+            web_search_diagnostics=self._build_web_search_diagnostics({}, references),
         )
+
+    def _convert_response_dict(self, response: dict[str, Any]) -> UnifiedResponse:
+        """将原始 Responses JSON 响应转换为 UnifiedResponse。"""
+        output = response.get("output") or []
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        thinking: str | None = None
+        for item in output:
+            item_type = item.get("type", "")
+            if item_type == "message":
+                for content_item in item.get("content") or []:
+                    if content_item.get("type") == "output_text" and content_item.get("text"):
+                        text_parts.append(content_item.get("text") or "")
+            elif item_type == "function_call":
+                try:
+                    args = json.loads(item.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls.append(
+                    ToolCall(
+                        id=item.get("call_id") or item.get("id") or "",
+                        function=ToolCallFunction(name=item.get("name") or "", arguments=args),
+                    )
+                )
+            elif item_type == "reasoning":
+                reasoning_texts = [rc.get("text") for rc in item.get("content") or [] if rc.get("text")]
+                if reasoning_texts:
+                    thinking = "\n".join(reasoning_texts)
+        full_text = "\n".join(text_parts) if text_parts else (response.get("output_text") or "")
+        references = self._extract_web_search_references(response)
+        return UnifiedResponse(
+            message=UnifiedMessage(
+                role="assistant",
+                content=full_text,
+                tool_calls=tool_calls if tool_calls else None,
+            ),
+            model=response.get("model") or "",
+            done=True,
+            thinking=thinking,
+            web_search_references=references,
+            web_search_diagnostics=self._build_web_search_diagnostics({}, references),
+        )
+
+    async def _convert_stream_event_dict(
+        self,
+        event: dict[str, Any],
+        tool_calls_acc: dict[int, dict],
+        options: dict,
+    ) -> AsyncIterator[StreamChunk]:
+        """将原始 Responses SSE JSON event 转换为 StreamChunk。"""
+        event_type = event.get("type", "")
+        if event_type == "response.output_text.delta":
+            if event.get("delta"):
+                yield StreamChunk(content=event.get("delta") or "")
+        elif event_type == "response.function_call_arguments.delta":
+            output_index = int(event.get("output_index", 0))
+            tool_calls_acc.setdefault(output_index, {"call_id": "", "name": "", "arguments": ""})
+            tool_calls_acc[output_index]["arguments"] += event.get("delta") or ""
+        elif event_type == "response.output_item.added":
+            item = event.get("item") or {}
+            if item.get("type") == "function_call":
+                output_index = int(event.get("output_index", 0))
+                tool_calls_acc[output_index] = {
+                    "call_id": item.get("call_id") or item.get("id") or "",
+                    "name": item.get("name") or "",
+                    "arguments": item.get("arguments") or "",
+                }
+        elif event_type == "response.function_call_arguments.done":
+            output_index = int(event.get("output_index", 0))
+            if output_index in tool_calls_acc:
+                tool_calls_acc[output_index]["arguments"] = event.get("arguments") or ""
+        elif event_type == "response.completed":
+            response = event.get("response") or {}
+            usage = self._usage_to_dict(response.get("usage"))
+            if tool_calls_acc:
+                unified_tool_calls = []
+                raw_arguments: dict[int, str] = {}
+                for idx, tc_data in sorted(tool_calls_acc.items()):
+                    try:
+                        args = json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                        raw_arguments[idx] = tc_data["arguments"]
+                    unified_tool_calls.append(
+                        ToolCall(
+                            id=tc_data.get("call_id", ""),
+                            function=ToolCallFunction(name=tc_data["name"], arguments=args),
+                        )
+                    )
+                tool_info = {"message": UnifiedMessage(role="assistant", content="", tool_calls=unified_tool_calls)}
+                if raw_arguments:
+                    tool_info["raw_arguments"] = raw_arguments
+                yield StreamChunk(type="tool_call", is_tool_call=True, tool_info=tool_info, finish_reason="tool_calls", usage=usage)
+            references = self._extract_web_search_references(response)
+            yield StreamChunk(
+                type="finish",
+                finish_reason="completed",
+                usage=usage,
+                web_search_references=references,
+                web_search_diagnostics=self._build_web_search_diagnostics(options, references),
+            )
+        elif event_type in ("response.failed", "response.incomplete"):
+            error_obj = (event.get("response") or {}).get("error") or event.get("error") or event.get("incomplete_details")
+            error_message = self._response_error_to_message(error_obj) or f"Responses API stream {event_type}"
+            finish_reason = "failed" if event_type == "response.failed" else "incomplete"
+            yield StreamChunk(type="error", error=error_message, finish_reason=finish_reason)
+            raise ModelAPIError(
+                error_message,
+                provider=self.config.provider,
+                model=self.config.name,
+                endpoint=self.endpoint,
+                retryable=False,
+            )
 
     @staticmethod
     def _response_error_to_message(error) -> str:
@@ -538,6 +766,124 @@ class OpenAIResponsesProvider(BaseProvider):
             if hasattr(usage, key):
                 result[key] = getattr(usage, key)
         return result or None
+
+    @staticmethod
+    def _object_to_dict(value: Any) -> dict[str, Any]:
+        """将 SDK 对象尽量转为 dict，便于统一解析引用。"""
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        if hasattr(value, "model_dump"):
+            try:
+                dumped = value.model_dump()
+                if isinstance(dumped, dict):
+                    return dumped
+            except Exception:
+                pass
+        result: dict[str, Any] = {}
+        for key in (
+            "type",
+            "title",
+            "url",
+            "snippet",
+            "text",
+            "source",
+            "published_at",
+            "annotations",
+            "content",
+            "metadata",
+        ):
+            if hasattr(value, key):
+                result[key] = getattr(value, key)
+        return result
+
+    @classmethod
+    def _extract_web_search_references(cls, response: Any) -> list[WebSearchReference]:
+        """从 Responses 输出 annotations / web_search_call 中提取统一搜索引用。"""
+        if response is None:
+            return []
+        references: list[WebSearchReference] = []
+        seen: set[str] = set()
+
+        def add_reference(data: Any, source: str = "openai_responses") -> None:
+            item = cls._object_to_dict(data)
+            title = str(item.get("title") or item.get("text") or item.get("url") or "")
+            url = str(item.get("url") or "")
+            if not url:
+                return
+            key = url
+            if key in seen:
+                return
+            seen.add(key)
+            references.append(
+                WebSearchReference(
+                    title=title,
+                    url=url,
+                    snippet=item.get("snippet"),
+                    source=item.get("source") or source,
+                    published_at=item.get("published_at"),
+                    metadata=item,
+                )
+            )
+
+        for output_item in getattr(response, "output", []) or []:
+            output_data = cls._object_to_dict(output_item)
+            if output_data.get("type") == "web_search_call":
+                for result in output_data.get("results", []) or []:
+                    add_reference(result)
+            for content_item in output_data.get("content", []) or []:
+                content_data = cls._object_to_dict(content_item)
+                for annotation in content_data.get("annotations", []) or []:
+                    annotation_data = cls._object_to_dict(annotation)
+                    if annotation_data.get("type") in ("url_citation", "citation") or annotation_data.get("url"):
+                        add_reference(annotation_data)
+        return references
+
+    @staticmethod
+    def _web_search_options(options: dict) -> dict[str, Any]:
+        raw = options.get("web_search") or {}
+        return dict(raw) if isinstance(raw, dict) else {"enabled": bool(raw)}
+
+    def _web_search_enabled(self, options: dict) -> bool:
+        web_search = self._web_search_options(options)
+        strategy = web_search.get("strategy", "off")
+        return bool(web_search.get("enabled")) and strategy != "off"
+
+    def _inject_web_search_tool(self, tools: list[dict], options: dict) -> None:
+        """按显式配置向 Responses tools 注入内置 web_search_preview。"""
+        if not self._web_search_enabled(options):
+            return
+        if any(str(tool.get("type", "")).startswith("web_search") for tool in tools):
+            return
+        web_search = self._web_search_options(options)
+        tool: dict[str, Any] = {"type": "web_search_preview"}
+        if context_size := web_search.get("context_size"):
+            tool["search_context_size"] = context_size
+        if user_location := web_search.get("user_location"):
+            tool["user_location"] = user_location
+        tool.update(web_search.get("metadata") or {})
+        tools.append(tool)
+
+    def _build_web_search_diagnostics(
+        self,
+        options: dict,
+        references: list[WebSearchReference],
+        *,
+        fallback_reason: str | None = None,
+    ) -> WebSearchDiagnostics | None:
+        web_search = self._web_search_options(options)
+        enabled = self._web_search_enabled(options)
+        if not enabled and not references:
+            return None
+        return WebSearchDiagnostics(
+            enabled=enabled,
+            strategy=str(web_search.get("strategy", "off")),
+            provider=self.config.provider,
+            status="completed" if references else ("enabled_no_references" if enabled else "references_only"),
+            fallback_reason=fallback_reason,
+            metadata={"reference_count": len(references)},
+        )
 
     @staticmethod
     def _convert_tools_to_responses(tools: list[dict]) -> list[dict]:

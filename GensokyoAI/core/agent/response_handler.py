@@ -68,6 +68,28 @@ class ResponseHandler:
             return await self._tool_executor.execute_batch(parsed)
         return None
 
+    @staticmethod
+    def _tool_error_chunk(result: dict) -> StreamChunk | None:
+        """将结构化工具错误结果转换为流式错误 chunk，供 Runtime/客户端直接消费。"""
+        error = result.get("error")
+        if not isinstance(error, dict):
+            return None
+        return StreamChunk(
+            type="tool_error",
+            status="failed",
+            content=result.get("content", ""),
+            error=error.get("technical_message") or result.get("content", ""),
+            error_code=error.get("error_code"),
+            error_details={
+                "tool_call_id": result.get("tool_call_id", ""),
+                "name": result.get("name", ""),
+                "user_message": error.get("user_message"),
+                "recoverable": error.get("recoverable"),
+                "action_hint": error.get("action_hint"),
+                "details": dict(error.get("details") or {}),
+            },
+        )
+
     def _record_tool_results(self, tool_calls_message: UnifiedMessage, results: list[dict]) -> None:
         """将工具调用和结果写入工作记忆"""
 
@@ -131,6 +153,10 @@ class ResponseHandler:
         tool_results = await self._safe_tool_calls(tool_calls_message)
         if not tool_results:
             return
+
+        for result in tool_results:
+            if error_chunk := self._tool_error_chunk(result):
+                yield error_chunk
 
         self._safe_record_results(tool_calls_message, tool_results)
         cont_messages = self._message_builder.build_continuation()

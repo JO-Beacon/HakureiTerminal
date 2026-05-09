@@ -5,7 +5,8 @@ from pathlib import Path
 import asyncio
 from contextvars import ContextVar
 
-from .types import UnifiedMessage, StreamChunk
+from .types import ProviderCapability, UnifiedMessage, StreamChunk
+from .model_registry import ModelRegistryService
 from .model_client import ModelClient
 from .save_coordinator import SaveCoordinator
 from .message_builder import MessageBuilder
@@ -32,6 +33,8 @@ from ...memory.semantic import SemanticMemoryManager
 from ...tools.registry import ToolRegistry
 from ...tools.executor import ToolExecutor
 from ...tools.tool_builtin.memory_tool import set_event_bus
+from ...tools.tool_builtin.web_search import configure_web_search_tool
+from ...tools.build_service import ToolBuildContext, ToolBuildResult, ToolBuildService
 from ...session.manager import SessionManager
 from ...session.context import SessionContext
 from ...utils.logger import logger
@@ -106,6 +109,8 @@ class Agent:
     def _init_tool_system(self) -> None:
         self.tool_registry = ToolRegistry()
         self.tool_executor = ToolExecutor(self.tool_registry, event_bus=self.event_bus)
+        self.tool_build_service = ToolBuildService(self.tool_registry)
+        self.model_registry_service = ModelRegistryService()
 
     def _init_session_system(self) -> None:
         self.session_manager = SessionManager(
@@ -130,6 +135,7 @@ class Agent:
 
     def _inject_dependencies(self) -> None:
         set_event_bus(self.event_bus)
+        configure_web_search_tool(self.config.tool)
 
     def _init_lifecycle(self) -> None:
         self.lifecycle = LifecycleManager(on_shutdown=self._on_shutdown)
@@ -197,6 +203,10 @@ class Agent:
                 semantic_memory=self.semantic_memory,
                 tool_registry=self.tool_registry,
                 tool_enabled=self.config.tool.enabled,
+                character_name=self.character_name,
+                web_search_config=self.config.tool.web_search,
+                model_config=self.config.model,
+                tool_build_result=self._build_tools(),
             )
         return self._message_builder
 
@@ -366,6 +376,39 @@ class Agent:
 
         logger.info("Agent 已启动")
 
+    async def _build_tools(self):
+        """通过 ModelRegistryService + ToolBuildService 构建本轮工具 schema 与 instructions。"""
+        model_info = await self.model_registry_service.get_model_info(self.config.model)
+        capabilities = set(model_info.capabilities)
+        if not capabilities:
+            capabilities = {ProviderCapability.CHAT, ProviderCapability.STREAM}
+        result = self.tool_build_service.build(
+            ToolBuildContext(
+                tool_config=self.config.tool,
+                model_config=self.config.model,
+                model_capabilities=capabilities,
+                character_name=self.character_name,
+            )
+        )
+        self._publish_tool_selected_event(result)
+        return result
+
+    def _publish_tool_selected_event(self, result: ToolBuildResult) -> None:
+        """发布本轮工具选择结果，供 Runtime/客户端观测工具注入控制面。"""
+        self.event_bus.publish(
+            Event(
+                type=SystemEvent.TOOL_CALL_SELECTED,
+                source="tool_build_service",
+                data={
+                    "enabled_tool_names": list(result.enabled_tool_names),
+                    "tool_count": len(result.tools),
+                    "model_supports_tools": result.model_supports_tools,
+                    "disabled_reasons": dict(result.disabled_reasons),
+                    "has_instructions": bool(result.instructions),
+                },
+            )
+        )
+
     async def _on_generate_response(self, event: Event) -> None:
         user_input = event.data.get("user_input", "")
         system_contexts = event.data.get("system_contexts", [])
@@ -373,8 +416,10 @@ class Agent:
         full_response = ""
         try:
             await self._ensure_background_manager()
+            tool_build_result = await self._build_tools()
+            self.message_builder.update_tool_build_result(tool_build_result)
             messages = self.message_builder.build(user_input, system_contexts)
-            tools = self.tool_registry.get_schemas() if self.config.tool.enabled else None
+            tools = tool_build_result.tools or None
 
             async for chunk in self.response_handler.process_stream(messages, tools):
                 if self.is_shutting_down:

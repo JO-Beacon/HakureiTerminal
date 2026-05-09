@@ -11,6 +11,8 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 from .base import BaseProvider
 from .request_utils import merge_headers
 from ..types import (
+    ImageInput,
+    MessageContentPart,
     UnifiedResponse,
     UnifiedMessage,
     UnifiedEmbeddingResponse,
@@ -237,7 +239,7 @@ class ClaudeProvider(BaseProvider):
             ModelInfo(
                 id=self.config.name,
                 name=self.config.name,
-                capabilities=sorted(self.capabilities),
+                capabilities=sorted(self.apply_model_capability_overrides(self.capabilities)),
                 metadata={"fallback": True},
             )
         ]
@@ -275,6 +277,55 @@ class ClaudeProvider(BaseProvider):
             return None
         return min(max_tokens - 1, max(1024, max_tokens // 2))
 
+    @staticmethod
+    def _image_to_block(image: ImageInput | dict | Any) -> dict:
+        """将统一图片输入转换为 Claude image content block。"""
+        url = image.get("url") if isinstance(image, dict) else getattr(image, "url", None)
+        data = image.get("data") if isinstance(image, dict) else getattr(image, "data", None)
+        mime_type = (
+            image.get("mime_type") if isinstance(image, dict) else getattr(image, "mime_type", None)
+        ) or "image/png"
+        if data:
+            if str(data).startswith("data:") and ";base64," in str(data):
+                data = str(data).split(";base64,", 1)[1]
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": data,
+                },
+            }
+        if url:
+            return {
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": url,
+                },
+            }
+        return {"type": "text", "text": ""}
+
+    @staticmethod
+    def _convert_content_blocks(content: Any) -> Any:
+        """将统一多模态 content parts 转换为 Claude content blocks。"""
+        if not isinstance(content, list):
+            return content
+
+        blocks: list[dict] = []
+        for part in content:
+            part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", "text")
+            if part_type == "text":
+                text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+                if text is not None:
+                    blocks.append({"type": "text", "text": str(text)})
+                continue
+
+            image = part.get("image") if isinstance(part, dict) else getattr(part, "image", None)
+            if part_type == "image" and image:
+                blocks.append(ClaudeProvider._image_to_block(image))
+        return blocks
+
     @classmethod
     def _convert_messages_to_claude(cls, messages: list[dict]) -> tuple[str, list[dict]]:
         """
@@ -299,11 +350,16 @@ class ClaudeProvider(BaseProvider):
 
         for msg in messages:
             role = msg.get("role", "")
-            content = msg.get("content", "")
+            content = cls._convert_content_blocks(msg.get("content", ""))
 
             if role == "system":
                 if content:
-                    system_parts.append(str(content))
+                    if isinstance(content, list):
+                        system_parts.extend(
+                            block.get("text", "") for block in content if block.get("type") == "text"
+                        )
+                    else:
+                        system_parts.append(str(content))
                 continue
 
             if role == "tool":
@@ -313,12 +369,12 @@ class ClaudeProvider(BaseProvider):
             flush_tool_results()
 
             if role == "assistant":
-                claude_messages.append(cls._convert_assistant_message(msg))
+                claude_messages.append(cls._convert_assistant_message({**msg, "content": content}))
             elif role == "user":
                 claude_messages.append({"role": "user", "content": content})
             else:
                 # Claude 只接受 user/assistant；未知角色降级为 user 文本。
-                claude_messages.append({"role": "user", "content": str(content)})
+                claude_messages.append({"role": "user", "content": content if isinstance(content, list) else str(content)})
 
         flush_tool_results()
 
@@ -336,7 +392,10 @@ class ClaudeProvider(BaseProvider):
 
         blocks: list[dict] = []
         if content:
-            blocks.append({"type": "text", "text": str(content)})
+            if isinstance(content, list):
+                blocks.extend(content)
+            else:
+                blocks.append({"type": "text", "text": str(content)})
 
         for tool_call in tool_calls:
             tool_id, name, arguments = cls._extract_tool_call(tool_call)

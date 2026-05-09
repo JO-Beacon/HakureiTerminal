@@ -24,7 +24,8 @@ ROOT_FOR_IMPORT = Path(__file__).resolve().parent
 if str(ROOT_FOR_IMPORT) not in sys.path:
     sys.path.insert(0, str(ROOT_FOR_IMPORT))
 
-from GensokyoAI.runtime import DependencyError, RuntimeService
+from GensokyoAI.runtime import DependencyError
+from GensokyoAI.runtime.service import RuntimeService
 
 
 def _json_default(value: Any) -> str:

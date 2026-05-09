@@ -3,14 +3,26 @@
 # GensokyoAI/core/agent/model_client.py
 
 import asyncio
+import time
 from typing import AsyncIterator, Optional
 
-from .types import UnifiedResponse, UnifiedMessage, UnifiedEmbeddingResponse, StreamChunk, ProviderCapability
+from .types import (
+    ImageGenerationRequest,
+    ImageGenerationResult,
+    ModelCallTiming,
+    ProviderCapability,
+    StreamChunk,
+    UnifiedEmbeddingResponse,
+    UnifiedMessage,
+    UnifiedResponse,
+)
 from .providers import ProviderFactory, BaseProvider
+from .providers.auth_utils import AuthRefreshError, sanitize_auth_data
 from .providers.request_utils import ModelAPIError, is_retryable_error, normalize_model_error
 from ..config import EmbeddingConfig, ModelConfig
 from ..exceptions import ModelError
 from ..events import Event, SystemEvent, EventBus
+from ...runtime.event_contract import sanitize_event_payload
 from ...utils.logger import logger
 
 
@@ -38,11 +50,21 @@ class ModelClient:
 
     def _build_options(self) -> dict:
         """构建模型选项"""
-        return {
+        options = {
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
             "num_predict": self.config.max_tokens,
         }
+        if self.config.web_search_enabled or self.config.web_search_strategy != "off":
+            options["web_search"] = {
+                "enabled": self.config.web_search_enabled,
+                "strategy": self.config.web_search_strategy,
+                "context_size": self.config.web_search_context_size,
+                "user_location": dict(self.config.web_search_user_location),
+                "allow_fallback": self.config.web_search_allow_fallback,
+                "metadata": dict(self.config.web_search_metadata),
+            }
+        return options
 
     def _build_embedding_config(self) -> ModelConfig:
         """构建独立的 Embedding Provider 配置。"""
@@ -59,6 +81,7 @@ class ModelClient:
             base_url=embedding_config.base_url or self.config.base_url,
             api_key=embedding_config.api_key or self.config.api_key,
             extra_headers=self.config.extra_headers,
+            auth=self.config.auth,
             timeout=embedding_config.timeout or self.config.timeout,
             thinking_enabled=False,
             retry_max_attempts=self.config.retry_max_attempts,
@@ -92,6 +115,55 @@ class ModelClient:
             merged.setdefault("encoding_format", self._embedding_config.encoding_format)
         return merged
 
+    def _publish_runtime_model_event(self, event_type: SystemEvent, data: dict) -> None:
+        """发布 Runtime 模型状态事件，并统一清洗敏感字段。"""
+        if not self._event_bus:
+            return
+        self._event_bus.publish(
+            Event(
+                type=event_type,
+                source="model_client",
+                data=sanitize_event_payload(data),
+            )
+        )
+
+    def _publish_model_started(self, *, context: str, provider: str, model: str, **data) -> None:
+        self._publish_runtime_model_event(
+            SystemEvent.MODEL_REQUEST_STARTED,
+            {"context": context, "provider": provider, "model": model, **data},
+        )
+
+    def _publish_model_completed(self, timing: ModelCallTiming) -> None:
+        self._publish_runtime_model_event(
+            SystemEvent.MODEL_COMPLETED,
+            {
+                "context": timing.context,
+                "provider": timing.provider,
+                "model": timing.model,
+                "duration_ms": timing.duration_ms,
+                "finish_reason": timing.finish_reason,
+                "usage": timing.usage,
+            },
+        )
+
+    def _publish_model_failed(self, error: Exception, context: dict) -> None:
+        data = {
+            "model": self.config.name,
+            "provider": self.config.provider,
+            "error": str(error),
+            "error_type": type(error).__name__,
+            **context,
+        }
+        if isinstance(error, ModelAPIError):
+            data.update(
+                {
+                    "status_code": error.status_code,
+                    "endpoint": error.endpoint,
+                    "retryable": error.retryable,
+                }
+            )
+        self._publish_runtime_model_event(SystemEvent.MODEL_FAILED, data)
+
     def _publish_error(self, error: Exception, context: dict) -> None:
         """发布错误事件 - 立即通知监听器"""
         if self._event_bus:
@@ -113,17 +185,111 @@ class ModelClient:
                     }
                 )
 
+            cleaned = sanitize_event_payload(data)
             self._event_bus.publish(
                 Event(
                     type=SystemEvent.MODEL_ERROR,
                     source="model_client",
-                    data=data,
+                    data=cleaned,
                 )
             )
+            self._publish_model_failed(error, context)
 
     def _retry_status_codes(self) -> set[int]:
         """获取当前配置的可重试 HTTP 状态码。"""
         return set(self.config.retry_status_codes or [])
+
+    @staticmethod
+    def _now() -> float:
+        """获取单调时钟时间，用于稳定计算调用耗时。"""
+        return time.perf_counter()
+
+    @staticmethod
+    def _elapsed_ms(start_time: float, now: float | None = None) -> float:
+        """计算从 start_time 到 now 的毫秒耗时。"""
+        current = now if now is not None else time.perf_counter()
+        return round((current - start_time) * 1000, 3)
+
+    def _finish_timing(self, timing: ModelCallTiming) -> ModelCallTiming:
+        """补齐 timing 的结束时间和总耗时。"""
+        now = self._now()
+        timing.end_time = now
+        timing.duration_ms = self._elapsed_ms(timing.start_time, now)
+        return timing
+
+    def _publish_timing(self, timing: ModelCallTiming) -> None:
+        """发布模型调用耗时观测事件。"""
+        if not self._event_bus:
+            return
+        self._event_bus.publish(
+            Event(
+                type=SystemEvent.MODEL_CALL_TIMING,
+                source="model_client",
+                data={
+                    "context": timing.context,
+                    "provider": timing.provider,
+                    "model": timing.model,
+                    "timing": timing,
+                    "duration_ms": timing.duration_ms,
+                    "first_chunk_ms": timing.first_chunk_ms,
+                    "first_token_ms": timing.first_token_ms,
+                    "first_reasoning_ms": timing.first_reasoning_ms,
+                    "reasoning_chunk_count": timing.reasoning_chunk_count,
+                    "reasoning_char_count": timing.reasoning_char_count,
+                    "content_chunk_count": timing.content_chunk_count,
+                    "content_char_count": timing.content_char_count,
+                    "finish_reason": timing.finish_reason,
+                    "usage": timing.usage,
+                    "metadata": timing.metadata,
+                },
+            )
+        )
+
+    def _publish_auth_event(self, status: str, context: dict) -> None:
+        """发布认证刷新事件，自动清洗敏感字段。"""
+        if not self._event_bus:
+            return
+        self._event_bus.publish(
+            Event(
+                type=SystemEvent.MODEL_AUTH,
+                source="model_client",
+                data=sanitize_auth_data({"status": status, **context}),
+            )
+        )
+
+    async def _prepare_provider_auth(
+        self,
+        provider: BaseProvider,
+        *,
+        context: str,
+        model: str,
+        force_refresh: bool = False,
+    ) -> None:
+        """在调用 Provider 前准备动态认证。"""
+        if not getattr(provider, "_token_manager", None):
+            return
+        self._publish_auth_event(
+            "token_refresh_started" if force_refresh else "auth_prepare_started",
+            {"context": context, "provider": provider.config.provider, "model": model},
+        )
+        try:
+            await provider.prepare_auth(force_refresh=force_refresh)
+        except Exception as e:
+            self._publish_auth_event(
+                "token_refresh_failed",
+                {
+                    "context": context,
+                    "provider": provider.config.provider,
+                    "model": model,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+            )
+            raise AuthRefreshError(str(e)) from e
+        self._publish_auth_event(
+            "token_refresh_completed" if force_refresh else "auth_prepare_completed",
+            {"context": context, "provider": provider.config.provider, "model": model},
+        )
 
     async def _call_with_retry(
         self,
@@ -146,8 +312,15 @@ class ModelClient:
         call_timeout = timeout or self.config.timeout
         call_endpoint = endpoint if endpoint is not None else getattr(call_provider, "endpoint", None)
 
+        auth_refreshed_after_401 = False
+
         for attempt in range(1, max_attempts + 1):
             try:
+                await self._prepare_provider_auth(
+                    call_provider,
+                    context=context,
+                    model=model,
+                )
                 return await asyncio.wait_for(call_factory(), timeout=call_timeout)
             except asyncio.TimeoutError:
                 raise
@@ -161,6 +334,21 @@ class ModelClient:
                     endpoint=call_endpoint,
                     retry_status_codes=retry_status_codes,
                 )
+                if (
+                    normalized.status_code == 401
+                    and not auth_refreshed_after_401
+                    and getattr(call_provider.config, "auth", None)
+                    and call_provider.config.auth.allow_401_refresh
+                ):
+                    auth_refreshed_after_401 = True
+                    await self._prepare_provider_auth(
+                        call_provider,
+                        context=context,
+                        model=model,
+                        force_refresh=True,
+                    )
+                    return await asyncio.wait_for(call_factory(), timeout=call_timeout)
+
                 if attempt >= max_attempts or not is_retryable_error(
                     normalized,
                     retry_status_codes,
@@ -171,23 +359,29 @@ class ModelClient:
                     f"模型 API 调用失败，准备重试 ({attempt + 1}/{max_attempts})，"
                     f"context={context}, status={normalized.status_code}, error={normalized}"
                 )
+                retry_data = {
+                    "model": model,
+                    "provider": call_provider_name,
+                    "context": context,
+                    "status": "retrying",
+                    "attempt": attempt + 1,
+                    "max_attempts": max_attempts,
+                    "error": str(normalized),
+                    "status_code": normalized.status_code,
+                    "endpoint": normalized.endpoint,
+                }
                 if self._event_bus:
+                    cleaned_retry_data = sanitize_event_payload(retry_data)
                     self._event_bus.publish(
                         Event(
                             type=SystemEvent.MODEL_ERROR,
                             source="model_client",
-                            data={
-                                "model": model,
-                                "provider": call_provider_name,
-                                "context": context,
-                                "status": "retrying",
-                                "attempt": attempt + 1,
-                                "max_attempts": max_attempts,
-                                "error": str(normalized),
-                                "status_code": normalized.status_code,
-                                "endpoint": normalized.endpoint,
-                            },
+                            data=cleaned_retry_data,
                         )
+                    )
+                    self._publish_runtime_model_event(
+                        SystemEvent.MODEL_RETRY_SCHEDULED,
+                        cleaned_retry_data,
                     )
                 if delay:
                     await asyncio.sleep(delay)
@@ -224,7 +418,21 @@ class ModelClient:
         if hasattr(self.config, "think") and self.config.think:
             kwargs.setdefault("think", True)
 
+        timing = ModelCallTiming(
+            context="chat",
+            provider=self.config.provider,
+            model=call_model,
+            start_time=self._now(),
+            message_count=len(messages),
+        )
+
         try:
+            self._publish_model_started(
+                context="chat",
+                provider=self.config.provider,
+                model=call_model,
+                message_count=len(messages),
+            )
             logger.debug(f"非流式调用模型，消息数: {len(messages)}")
             response = await self._call_with_retry(
                 lambda: self._provider.chat(
@@ -237,7 +445,34 @@ class ModelClient:
                 context="chat",
                 model=call_model,
             )
-            logger.debug(f"模型响应完成，长度: {len(response.message.content or '')}")
+            content = getattr(response.message, "content", "") or ""
+            reasoning = (
+                getattr(response.message, "reasoning_content", None)
+                or getattr(response, "thinking", None)
+                or ""
+            )
+            self._finish_timing(timing)
+            if content:
+                timing.content_chunk_count = 1
+                timing.content_char_count = len(content)
+                timing.first_token_ms = timing.duration_ms
+            if reasoning:
+                timing.reasoning_chunk_count = 1
+                timing.reasoning_char_count = len(reasoning)
+                timing.first_reasoning_ms = timing.duration_ms
+            self._publish_timing(timing)
+            if timing.first_token_ms is not None:
+                self._publish_runtime_model_event(
+                    SystemEvent.MODEL_FIRST_TOKEN,
+                    {
+                        "context": "chat",
+                        "provider": self.config.provider,
+                        "model": call_model,
+                        "first_token_ms": timing.first_token_ms,
+                    },
+                )
+            self._publish_model_completed(timing)
+            logger.debug(f"模型响应完成，长度: {len(content)}，耗时: {timing.duration_ms}ms")
             return response
 
         except asyncio.TimeoutError:
@@ -302,14 +537,36 @@ class ModelClient:
         if hasattr(self.config, "think") and self.config.think:
             kwargs.setdefault("think", True)
 
+        timing = ModelCallTiming(
+            context="chat_stream",
+            provider=self.config.provider,
+            model=call_model,
+            start_time=self._now(),
+            message_count=len(messages),
+        )
+        timing_published = False
+
         try:
+            self._publish_model_started(
+                context="chat_stream",
+                provider=self.config.provider,
+                model=call_model,
+                message_count=len(messages),
+            )
             logger.debug(f"流式调用模型，消息数: {len(messages)}")
             max_attempts = max(1, self.config.retry_max_attempts)
             delay = max(0.0, self.config.retry_initial_delay)
             backoff = max(1.0, self.config.retry_backoff_factor)
 
+            auth_refreshed_after_401 = False
+
             for attempt in range(1, max_attempts + 1):
                 try:
+                    await self._prepare_provider_auth(
+                        self._provider,
+                        context="chat_stream",
+                        model=call_model,
+                    )
                     stream = self._provider.chat_stream(
                         model=call_model,
                         messages=messages,
@@ -326,7 +583,46 @@ class ModelClient:
                             )
                         except StopAsyncIteration:
                             break
+
+                        elapsed_ms = self._elapsed_ms(timing.start_time)
+                        if timing.first_chunk_ms is None:
+                            timing.first_chunk_ms = elapsed_ms
+                        if chunk.content:
+                            timing.content_chunk_count += 1
+                            timing.content_char_count += len(chunk.content)
+                            if timing.first_token_ms is None:
+                                timing.first_token_ms = elapsed_ms
+                                self._publish_runtime_model_event(
+                                    SystemEvent.MODEL_FIRST_TOKEN,
+                                    {
+                                        "context": "chat_stream",
+                                        "provider": self.config.provider,
+                                        "model": call_model,
+                                        "first_token_ms": timing.first_token_ms,
+                                        "first_chunk_ms": timing.first_chunk_ms,
+                                    },
+                                )
+                        if chunk.reasoning_content:
+                            timing.reasoning_chunk_count += 1
+                            timing.reasoning_char_count += len(chunk.reasoning_content)
+                            if timing.first_reasoning_ms is None:
+                                timing.first_reasoning_ms = elapsed_ms
+                        if chunk.usage:
+                            timing.usage = chunk.usage
+                        if chunk.finish_reason:
+                            timing.finish_reason = chunk.finish_reason
+                        if chunk.type == "finish":
+                            self._finish_timing(timing)
+                            chunk.timing = timing
+                            self._publish_timing(timing)
+                            timing_published = True
+                            self._publish_model_completed(timing)
                         yield chunk
+                    if not timing_published:
+                        self._finish_timing(timing)
+                        self._publish_timing(timing)
+                        timing_published = True
+                        self._publish_model_completed(timing)
                     break
                 except asyncio.TimeoutError:
                     raise
@@ -340,6 +636,21 @@ class ModelClient:
                         endpoint=getattr(self._provider, "endpoint", None),
                         retry_status_codes=self._retry_status_codes(),
                     )
+                    if (
+                        normalized.status_code == 401
+                        and not auth_refreshed_after_401
+                        and getattr(self._provider.config, "auth", None)
+                        and self._provider.config.auth.allow_401_refresh
+                    ):
+                        auth_refreshed_after_401 = True
+                        await self._prepare_provider_auth(
+                            self._provider,
+                            context="chat_stream",
+                            model=call_model,
+                            force_refresh=True,
+                        )
+                        continue
+
                     if attempt >= max_attempts or not is_retryable_error(
                         normalized,
                         self._retry_status_codes(),
@@ -348,6 +659,20 @@ class ModelClient:
                     logger.warning(
                         f"流式模型 API 调用失败，准备重试 ({attempt + 1}/{max_attempts})，"
                         f"status={normalized.status_code}, error={normalized}"
+                    )
+                    self._publish_runtime_model_event(
+                        SystemEvent.MODEL_RETRY_SCHEDULED,
+                        {
+                            "model": call_model,
+                            "provider": self.config.provider,
+                            "context": "chat_stream",
+                            "status": "retrying",
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "error": str(normalized),
+                            "status_code": normalized.status_code,
+                            "endpoint": normalized.endpoint,
+                        },
                     )
                     yield StreamChunk(
                         type="status",
@@ -426,6 +751,73 @@ class ModelClient:
             self._provider.update_config(config)
             logger.info(f"ModelClient 配置已更新，Provider: {config.provider}, 模型: {config.name}")
 
+    async def generate_image(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        **kwargs,
+    ) -> ImageGenerationResult:
+        """统一图片生成入口。"""
+        call_model = model or self.config.name
+        if not (
+            self._provider.supports(ProviderCapability.IMAGE_GENERATION)
+            or self._provider.supports(ProviderCapability.IMAGE)
+        ):
+            raise ModelError(f"当前 Provider ({self.config.provider}) 不支持图片生成")
+
+        request = ImageGenerationRequest(
+            prompt=prompt,
+            model=call_model,
+            size=kwargs.pop("size", None),
+            quality=kwargs.pop("quality", None),
+            style=kwargs.pop("style", None),
+            n=kwargs.pop("n", 1),
+            response_format=kwargs.pop("response_format", None),
+            metadata=kwargs.pop("metadata", {}),
+        )
+        timing = ModelCallTiming(
+            context="image_generation",
+            provider=self.config.provider,
+            model=call_model,
+            start_time=self._now(),
+            prompt_length=len(prompt),
+        )
+        try:
+            self._publish_model_started(
+                context="image_generation",
+                provider=self.config.provider,
+                model=call_model,
+                prompt_length=len(prompt),
+            )
+            response = await self._call_with_retry(
+                lambda: self._provider.image_generation(request, **kwargs),
+                context="image_generation",
+                model=call_model,
+            )
+            self._finish_timing(timing)
+            response.timing = timing
+            self._publish_timing(timing)
+            self._publish_model_completed(timing)
+            return response
+        except NotImplementedError as e:
+            raise ModelError(f"当前 Provider ({self.config.provider}) 不支持图片生成") from e
+        except Exception as e:
+            normalized = (
+                e
+                if isinstance(e, ModelAPIError)
+                else normalize_model_error(
+                    e,
+                    provider=self.config.provider,
+                    model=call_model,
+                    retry_status_codes=self._retry_status_codes(),
+                )
+            )
+            self._publish_error(
+                normalized,
+                {"context": "image_generation", "prompt_length": len(prompt)},
+            )
+            raise ModelError(f"图片生成失败: {normalized}") from e
+
     async def embeddings(
         self,
         prompt: str,
@@ -459,6 +851,19 @@ class ModelClient:
                 f"调用 embeddings 模型，Provider: {embedding_model_config.provider}, "
                 f"模型: {call_model}, 文本长度: {len(prompt)}"
             )
+            timing = ModelCallTiming(
+                context="embeddings",
+                provider=embedding_model_config.provider,
+                model=call_model,
+                start_time=self._now(),
+                prompt_length=len(prompt),
+            )
+            self._publish_model_started(
+                context="embeddings",
+                provider=embedding_model_config.provider,
+                model=call_model,
+                prompt_length=len(prompt),
+            )
             response = await self._call_with_retry(
                 lambda: embedding_provider.embeddings(
                     model=call_model,
@@ -472,7 +877,13 @@ class ModelClient:
                 timeout=call_timeout,
                 endpoint=getattr(embedding_provider, "endpoint", None),
             )
-            logger.debug(f"embeddings 响应完成，向量维度: {len(response.embedding)}")
+            timing.embedding_dimension = len(response.embedding)
+            self._finish_timing(timing)
+            self._publish_timing(timing)
+            self._publish_model_completed(timing)
+            logger.debug(
+                f"embeddings 响应完成，向量维度: {len(response.embedding)}，耗时: {timing.duration_ms}ms"
+            )
             return response
 
         except asyncio.TimeoutError:

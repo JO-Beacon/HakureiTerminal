@@ -6,10 +6,13 @@
 # GensokyoAI/core/agent/providers/gemini_provider.py
 
 import json
-from typing import AsyncIterator, TYPE_CHECKING
+from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import BaseProvider
+from .openai_provider import OpenAIProvider
 from ..types import (
+    ImageInput,
+    MessageContentPart,
     UnifiedResponse,
     UnifiedMessage,
     UnifiedEmbeddingResponse,
@@ -18,6 +21,8 @@ from ..types import (
     ToolCallFunction,
     ProviderCapability,
     ModelInfo,
+    WebSearchDiagnostics,
+    WebSearchReference,
 )
 from ....utils.logger import logger
 
@@ -48,6 +53,7 @@ class GeminiProvider(BaseProvider):
             ProviderCapability.EMBEDDINGS,
             ProviderCapability.VISION,
             ProviderCapability.REASONING,
+            ProviderCapability.WEB_SEARCH,
         }
 
     def _build_client(self):
@@ -88,9 +94,9 @@ class GeminiProvider(BaseProvider):
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
 
-        gemini_tools = None
-        if tools:
-            gemini_tools = self._convert_tools_to_gemini(tools)
+        gemini_tools = self._convert_tools_to_gemini(tools) if tools else []
+        self._inject_google_search_tool(gemini_tools, options, genai_types)
+        if gemini_tools:
             config_kwargs["tools"] = gemini_tools
 
         config = genai_types.GenerateContentConfig(**config_kwargs)
@@ -129,8 +135,10 @@ class GeminiProvider(BaseProvider):
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
 
-        if tools:
-            config_kwargs["tools"] = self._convert_tools_to_gemini(tools)
+        gemini_tools = self._convert_tools_to_gemini(tools) if tools else []
+        self._inject_google_search_tool(gemini_tools, options, genai_types)
+        if gemini_tools:
+            config_kwargs["tools"] = gemini_tools
 
         config = genai_types.GenerateContentConfig(**config_kwargs)
 
@@ -170,7 +178,13 @@ class GeminiProvider(BaseProvider):
 
             finish_reason = getattr(candidate, "finish_reason", None)
             if finish_reason:
-                yield StreamChunk(type="finish", finish_reason=str(finish_reason))
+                references = self._extract_web_search_references(chunk)
+                yield StreamChunk(
+                    type="finish",
+                    finish_reason=str(finish_reason),
+                    web_search_references=references,
+                    web_search_diagnostics=self._build_web_search_diagnostics(options, references),
+                )
 
     async def list_models(self) -> list[ModelInfo]:
         """列出 Gemini 模型。"""
@@ -182,7 +196,7 @@ class GeminiProvider(BaseProvider):
                 ModelInfo(
                     id=self.config.name,
                     name=self.config.name,
-                    capabilities=sorted(self.capabilities),
+                    capabilities=sorted(self._infer_model_capabilities(self.config.name, {})),
                     metadata={"fallback": True},
                 )
             ]
@@ -193,25 +207,38 @@ class GeminiProvider(BaseProvider):
             async for item in items:
                 model_id = getattr(item, "name", "") or getattr(item, "id", "")
                 if model_id:
+                    metadata = item.model_dump() if hasattr(item, "model_dump") else {}
                     models.append(
                         ModelInfo(
                             id=model_id,
                             name=model_id,
-                            capabilities=sorted(self.capabilities),
+                            capabilities=sorted(self._infer_model_capabilities(model_id, metadata)),
+                            metadata=metadata,
                         )
                     )
         else:
             for item in items:
                 model_id = getattr(item, "name", "") or getattr(item, "id", "")
                 if model_id:
+                    metadata = item.model_dump() if hasattr(item, "model_dump") else {}
                     models.append(
                         ModelInfo(
                             id=model_id,
                             name=model_id,
-                            capabilities=sorted(self.capabilities),
+                            capabilities=sorted(self._infer_model_capabilities(model_id, metadata)),
+                            metadata=metadata,
                         )
                     )
         return models
+
+    def _infer_model_capabilities(self, model_id: str, metadata: dict[str, Any]) -> set[str]:
+        """基于 Gemini 模型名和元数据推断模型能力。"""
+        capabilities = set(self.capabilities)
+        normalized_id = model_id.lower()
+        tokens = OpenAIProvider._metadata_capability_tokens(metadata)
+        if OpenAIProvider._metadata_or_model_indicates_web_search(normalized_id, tokens):
+            capabilities.add(ProviderCapability.WEB_SEARCH)
+        return self.apply_model_capability_overrides(capabilities)
 
     async def embeddings(
         self,
@@ -239,6 +266,40 @@ class GeminiProvider(BaseProvider):
     # ==================== 转换工具方法 ====================
 
     @staticmethod
+    def _image_to_part(image: ImageInput | dict | Any) -> dict:
+        """将统一图片输入转换为 Gemini inline_data/file_data part。"""
+        url = image.get("url") if isinstance(image, dict) else getattr(image, "url", None)
+        data = image.get("data") if isinstance(image, dict) else getattr(image, "data", None)
+        mime_type = (
+            image.get("mime_type") if isinstance(image, dict) else getattr(image, "mime_type", None)
+        ) or "image/png"
+        if data:
+            return {"inline_data": {"mime_type": mime_type, "data": data}}
+        if url:
+            return {"file_data": {"mime_type": mime_type, "file_uri": url}}
+        return {"text": ""}
+
+    @staticmethod
+    def _convert_content_parts(content: Any) -> list[dict]:
+        """将统一多模态 content parts 转换为 Gemini parts。"""
+        if not isinstance(content, list):
+            return [{"text": str(content)}]
+
+        parts: list[dict] = []
+        for part in content:
+            part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", "text")
+            if part_type == "text":
+                text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+                if text is not None:
+                    parts.append({"text": str(text)})
+                continue
+
+            image = part.get("image") if isinstance(part, dict) else getattr(part, "image", None)
+            if part_type == "image" and image:
+                parts.append(GeminiProvider._image_to_part(image))
+        return parts or [{"text": ""}]
+
+    @staticmethod
     def _convert_messages(messages: list[dict]) -> tuple[str, list]:
         """
         将 OpenAI 格式的消息转换为 Gemini 格式
@@ -252,18 +313,22 @@ class GeminiProvider(BaseProvider):
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
+            parts = GeminiProvider._convert_content_parts(content)
 
             if role == "system":
-                system_parts.append(content)
+                system_parts.append(
+                    "".join(part.get("text", "") for part in parts if "text" in part)
+                )
             elif role == "assistant":
-                gemini_contents.append({"role": "model", "parts": [{"text": content}]})
+                gemini_contents.append({"role": "model", "parts": parts})
             elif role == "tool":
                 # Gemini 的工具结果格式
+                tool_text = content if isinstance(content, str) else str(content)
                 gemini_contents.append(
-                    {"role": "user", "parts": [{"text": f"[工具结果] {content}"}]}
+                    {"role": "user", "parts": [{"text": f"[工具结果] {tool_text}"}]}
                 )
             else:
-                gemini_contents.append({"role": "user", "parts": [{"text": content}]})
+                gemini_contents.append({"role": "user", "parts": parts})
 
         system_instruction = "\n\n".join(system_parts) if system_parts else ""
 
@@ -313,6 +378,7 @@ class GeminiProvider(BaseProvider):
                     )
                 )
 
+        references = self._extract_web_search_references(response)
         return UnifiedResponse(
             message=UnifiedMessage(
                 role="assistant",
@@ -321,6 +387,106 @@ class GeminiProvider(BaseProvider):
             ),
             model=model,
             done=True,
+            web_search_references=references,
+            web_search_diagnostics=self._build_web_search_diagnostics({}, references),
+        )
+
+    @staticmethod
+    def _object_to_dict(value: Any) -> dict[str, Any]:
+        """将 Gemini SDK 对象尽量转为 dict。"""
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        if hasattr(value, "model_dump"):
+            try:
+                dumped = value.model_dump()
+                if isinstance(dumped, dict):
+                    return dumped
+            except Exception:
+                pass
+        result: dict[str, Any] = {}
+        for key in (
+            "grounding_metadata",
+            "grounding_chunks",
+            "grounding_supports",
+            "web",
+            "uri",
+            "title",
+            "text",
+            "segment",
+            "metadata",
+        ):
+            if hasattr(value, key):
+                result[key] = getattr(value, key)
+        return result
+
+    @classmethod
+    def _extract_web_search_references(cls, response: Any) -> list[WebSearchReference]:
+        """从 Gemini grounding_metadata 中提取统一搜索引用。"""
+        references: list[WebSearchReference] = []
+        seen: set[str] = set()
+        candidates = getattr(response, "candidates", []) or []
+        for candidate in candidates:
+            grounding = getattr(candidate, "grounding_metadata", None)
+            grounding_data = cls._object_to_dict(grounding)
+            for chunk in grounding_data.get("grounding_chunks", []) or []:
+                chunk_data = cls._object_to_dict(chunk)
+                web_data = cls._object_to_dict(chunk_data.get("web"))
+                url = str(web_data.get("uri") or web_data.get("url") or "")
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                references.append(
+                    WebSearchReference(
+                        title=str(web_data.get("title") or url),
+                        url=url,
+                        source="gemini_grounding",
+                        metadata={"chunk": chunk_data},
+                    )
+                )
+        return references
+
+    @staticmethod
+    def _web_search_options(options: dict) -> dict[str, Any]:
+        raw = options.get("web_search") or {}
+        return dict(raw) if isinstance(raw, dict) else {"enabled": bool(raw)}
+
+    def _web_search_enabled(self, options: dict) -> bool:
+        web_search = self._web_search_options(options)
+        strategy = web_search.get("strategy", "off")
+        return bool(web_search.get("enabled")) and strategy != "off"
+
+    def _inject_google_search_tool(self, tools: list, options: dict, genai_types: Any) -> None:
+        """按显式配置向 Gemini tools 注入 Google Search grounding。"""
+        if not self._web_search_enabled(options):
+            return
+        for tool in tools:
+            if getattr(tool, "google_search", None) is not None or getattr(tool, "google_search_retrieval", None) is not None:
+                return
+        try:
+            tools.append(genai_types.Tool(google_search=genai_types.GoogleSearch()))
+        except Exception:
+            try:
+                tools.append(genai_types.Tool(google_search_retrieval={}))
+            except Exception:
+                tools.append({"google_search": {}})
+
+    def _build_web_search_diagnostics(
+        self,
+        options: dict,
+        references: list[WebSearchReference],
+    ) -> WebSearchDiagnostics | None:
+        web_search = self._web_search_options(options)
+        enabled = self._web_search_enabled(options)
+        if not enabled and not references:
+            return None
+        return WebSearchDiagnostics(
+            enabled=enabled,
+            strategy=str(web_search.get("strategy", "off")),
+            provider=self.config.provider,
+            status="completed" if references else ("enabled_no_references" if enabled else "references_only"),
+            metadata={"reference_count": len(references)},
         )
 
     @staticmethod

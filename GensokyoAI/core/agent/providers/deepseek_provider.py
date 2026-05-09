@@ -40,7 +40,13 @@ class DeepSeekProvider(OpenAIProvider):
     @property
     def capabilities(self) -> set[str]:
         """DeepSeek Provider 能力声明。"""
-        return super().capabilities | {ProviderCapability.REASONING}
+        return {
+            ProviderCapability.CHAT,
+            ProviderCapability.STREAM,
+            ProviderCapability.TOOLS,
+            ProviderCapability.CUSTOM_ENDPOINT,
+            ProviderCapability.REASONING,
+        }
 
     def _build_client(self):
         """构建 DeepSeek OpenAI 兼容客户端"""
@@ -58,8 +64,9 @@ class DeepSeekProvider(OpenAIProvider):
         if self.config.api_key:
             kwargs["api_key"] = self.config.api_key
         kwargs["base_url"] = base_url
-        if self.config.extra_headers:
-            kwargs["default_headers"] = merge_headers(self.config.extra_headers)
+        default_headers = self.merged_headers()
+        if default_headers:
+            kwargs["default_headers"] = default_headers
         return AsyncOpenAI(**kwargs)
 
     @property

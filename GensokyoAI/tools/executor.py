@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Optional, Any
 
 from ..core.agent.types import UnifiedMessage
 
+from .errors import ToolError, ToolExecutionError
 from .registry import ToolRegistry
+from ..runtime.event_contract import sanitize_event_payload
 from ..utils.logger import logger
 
 if TYPE_CHECKING:
@@ -49,34 +51,33 @@ class ToolExecutor:
         name = tool_call.get("name")
         arguments = tool_call.get("arguments", {})
 
-        # 确保 name 是字符串
         if not name or not isinstance(name, str):
-            error_msg = f"无效的工具名称: {name}"
-            logger.error(error_msg)
-            return {
-                "role": "tool",
-                "tool_call_id": tool_call.get("id", ""),
-                "name": str(name) if name else "unknown",
-                "content": f"错误: {error_msg}",
-                "is_error": True,
-            }
+            error = ToolError(
+                error_code="tool.invalid_name",
+                technical_message=f"无效的工具名称: {name}",
+                user_message="工具调用名称无效。",
+                recoverable=True,
+                action_hint="请检查模型输出的 tool call name 字段。",
+                details={"name": name},
+            )
+            logger.error(error.technical_message)
+            return self._error_result(tool_call, str(name) if name else "unknown", error, legacy_prefix="错误")
 
-        # 🆕 发布工具调用开始事件
         self._publish_tool_event("started", name, arguments)
 
         tool_def = self._registry.get(name)
         if not tool_def:
-            error_msg = f"工具 '{name}' 未找到"
-            logger.warning(error_msg)
-            # 🆕 发布工具调用失败事件
-            self._publish_tool_event("failed", name, arguments, error_msg)
-            return {
-                "role": "tool",
-                "tool_call_id": tool_call.get("id", ""),
-                "name": name,
-                "content": f"调用出错啦: {error_msg}",
-                "is_error": True,
-            }
+            error = ToolError(
+                error_code="tool.not_found",
+                technical_message=f"工具 '{name}' 未找到",
+                user_message=f"工具“{name}”不可用。",
+                recoverable=True,
+                action_hint="请确认工具已注册，或从模型可用工具 schema 中移除该工具。",
+                details={"name": name},
+            )
+            logger.warning(error.technical_message)
+            self._publish_tool_event("failed", name, arguments, error.technical_message, tool_error=error)
+            return self._error_result(tool_call, name, error, legacy_prefix="调用出错啦")
 
         try:
             logger.debug(f"执行工具: {name}({arguments})")
@@ -84,16 +85,12 @@ class ToolExecutor:
             if tool_def.is_async:
                 result = await tool_def.func(**arguments)
             else:
-                # 同步函数在线程池中执行
                 result = await asyncio.to_thread(tool_def.func, **arguments)
 
-            # 转换结果为字符串
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False)
 
             logger.info(f"工具 {name} 执行成功: {result[:100]}...")
-
-            # 🆕 发布工具调用完成事件
             self._publish_tool_event("completed", name, arguments, result=result)
 
             return {
@@ -102,18 +99,41 @@ class ToolExecutor:
                 "name": name,
                 "content": result,
             }
+        except ToolExecutionError as e:
+            error = e.error
+            logger.error(f"工具 {name} 执行错误: {error.technical_message}")
+            self._publish_tool_event("failed", name, arguments, error.technical_message, tool_error=error)
+            return self._error_result(tool_call, name, error, legacy_prefix="错误")
         except Exception as e:
-            error_msg = f"工具执行失败: {e}"
+            error = ToolError(
+                error_code="tool.execution_failed",
+                technical_message=f"工具执行失败: {e}",
+                user_message="工具执行失败。",
+                recoverable=True,
+                action_hint="请稍后重试；若持续失败，请检查工具配置和运行环境。",
+                details={"name": name, "exception_type": type(e).__name__},
+            )
             logger.error(f"工具 {name} 执行错误: {e}")
-            # 🆕 发布工具调用失败事件
-            self._publish_tool_event("failed", name, arguments, error_msg)
-            return {
-                "role": "tool",
-                "tool_call_id": tool_call.get("id", ""),
-                "name": name,
-                "content": f"错误: {error_msg}",
-                "is_error": True,
-            }
+            self._publish_tool_event("failed", name, arguments, error.technical_message, tool_error=error)
+            return self._error_result(tool_call, name, error, legacy_prefix="错误")
+
+    @staticmethod
+    def _error_result(
+        tool_call: dict[str, Any],
+        name: str,
+        error: ToolError,
+        *,
+        legacy_prefix: str,
+    ) -> dict[str, Any]:
+        """构造兼容旧字段的结构化错误结果。"""
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.get("id", ""),
+            "name": name,
+            "content": f"{legacy_prefix}: {error.technical_message}",
+            "is_error": True,
+            "error": error.to_dict(),
+        }
 
     def _publish_tool_event(
         self,
@@ -122,6 +142,7 @@ class ToolExecutor:
         arguments: dict[str, Any],
         error: str | None = None,
         result: str | None = None,
+        tool_error: ToolError | None = None,
     ) -> None:
         """发布工具事件"""
         if self._event_bus is None:
@@ -131,6 +152,8 @@ class ToolExecutor:
 
         if status == "started":
             event_type = SystemEvent.TOOL_CALL_STARTED
+        elif status == "progress":
+            event_type = SystemEvent.TOOL_CALL_PROGRESS
         elif status == "completed":
             event_type = SystemEvent.TOOL_CALL_COMPLETED
         else:
@@ -138,10 +161,21 @@ class ToolExecutor:
 
         data: dict[str, Any] = {
             "name": name,
-            "arguments": arguments,
+            "arguments": sanitize_event_payload(arguments),
         }
         if error:
             data["error"] = error
+        if tool_error:
+            data.update(
+                {
+                    "error_code": tool_error.error_code,
+                    "user_message": tool_error.user_message,
+                    "technical_message": tool_error.technical_message,
+                    "recoverable": tool_error.recoverable,
+                    "action_hint": tool_error.action_hint,
+                    "details": dict(tool_error.details),
+                }
+            )
         if result:
             data["result"] = result[:200] if len(result) > 200 else result
 
@@ -149,9 +183,25 @@ class ToolExecutor:
             Event(
                 type=event_type,
                 source="tool_executor",
-                data=data,
+                data=sanitize_event_payload(data),
             )
         )
+
+    def publish_progress(
+        self,
+        name: str,
+        status: str,
+        *,
+        message: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """发布工具调用进度事件，供长耗时工具或外部工具适配器复用。"""
+        payload = {"status": status}
+        if message:
+            payload["message"] = message
+        if details:
+            payload["details"] = details
+        self._publish_tool_event("progress", name, payload)
 
     async def execute_batch(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """批量执行工具调用（并行）"""
@@ -165,25 +215,28 @@ class ToolExecutor:
         arguments = tool_call.get("arguments", {})
 
         if not name or not isinstance(name, str):
-            error_msg = f"无效的工具名称: {name}"
-            logger.error(error_msg)
-            return {
-                "role": "tool",
-                "tool_call_id": tool_call.get("id", ""),
-                "name": str(name) if name else "unknown",
-                "content": f"错误: {error_msg}",
-                "is_error": True,
-            }
+            error = ToolError(
+                error_code="tool.invalid_name",
+                technical_message=f"无效的工具名称: {name}",
+                user_message="工具调用名称无效。",
+                recoverable=True,
+                action_hint="请检查模型输出的 tool call name 字段。",
+                details={"name": name},
+            )
+            logger.error(error.technical_message)
+            return self._error_result(tool_call, str(name) if name else "unknown", error, legacy_prefix="错误")
 
         tool_def = self._registry.get(name)
         if not tool_def:
-            return {
-                "role": "tool",
-                "tool_call_id": tool_call.get("id", ""),
-                "name": name,
-                "content": f"错误: 工具 '{name}' 未找到",
-                "is_error": True,
-            }
+            error = ToolError(
+                error_code="tool.not_found",
+                technical_message=f"工具 '{name}' 未找到",
+                user_message=f"工具“{name}”不可用。",
+                recoverable=True,
+                action_hint="请确认工具已注册，或从模型可用工具 schema 中移除该工具。",
+                details={"name": name},
+            )
+            return self._error_result(tool_call, name, error, legacy_prefix="错误")
 
         try:
             result = tool_def.func(**arguments)
@@ -195,11 +248,15 @@ class ToolExecutor:
                 "name": name,
                 "content": result,
             }
+        except ToolExecutionError as e:
+            return self._error_result(tool_call, name, e.error, legacy_prefix="错误")
         except Exception as e:
-            return {
-                "role": "tool",
-                "tool_call_id": tool_call.get("id", ""),
-                "name": name,
-                "content": f"错误: {e}",
-                "is_error": True,
-            }
+            error = ToolError(
+                error_code="tool.execution_failed",
+                technical_message=f"工具执行失败: {e}",
+                user_message="工具执行失败。",
+                recoverable=True,
+                action_hint="请稍后重试；若持续失败，请检查工具配置和运行环境。",
+                details={"name": name, "exception_type": type(e).__name__},
+            )
+            return self._error_result(tool_call, name, error, legacy_prefix="错误")

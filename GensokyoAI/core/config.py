@@ -4,7 +4,7 @@
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from msgspec import Struct, field
 from enum import Enum
 import yaml
@@ -19,15 +19,43 @@ class LogLevel(Enum):
     ERROR = "ERROR"
 
 
+class AuthConfig(Struct):
+    """模型 Provider 认证配置。"""
+
+    auth_type: str | None = None
+    token_url: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    scope: str | None = None
+    refresh_token: str | None = None
+    access_token: str | None = None
+    expires_at: float | None = None
+    refresh_before_seconds: int = 60
+    auth_headers: dict[str, str] = field(default_factory=dict)
+    auth_body: dict[str, str] = field(default_factory=dict)
+    token_field: str = "access_token"
+    expires_in_field: str = "expires_in"
+    allow_401_refresh: bool = True
+
+
 class ModelConfig(Struct):
     """模型配置"""
 
-    provider: str = "ollama"  # LLM Provider: ollama / openai / deepseek / gemini / claude
+    provider: str = "ollama"  # LLM Provider: ollama / openai / openrouter / deepseek / gemini / claude
     name: str = "qwen3.5:9b"
     base_url: str | None = None
     api_path: str | None = None
     api_key: str | None = None  # API 密钥（OpenAI/Gemini/Claude 等需要）
     extra_headers: dict[str, str] = field(default_factory=dict)
+    auth: AuthConfig | None = None
+    model_capabilities_add: list[str] = field(default_factory=list)
+    model_capabilities_remove: list[str] = field(default_factory=list)
+    web_search_enabled: bool = False
+    web_search_strategy: Literal["off", "explicit", "auto"] = "off"
+    web_search_context_size: str | None = None
+    web_search_user_location: dict[str, Any] = field(default_factory=dict)
+    web_search_allow_fallback: bool = True
+    web_search_metadata: dict[str, Any] = field(default_factory=dict)
     stream: bool = True
     think: bool = False
     thinking_enabled: bool | None = None
@@ -94,12 +122,71 @@ class ThinkEngineConfig(Struct):
     initiative_max_tokens: int = 100  # 生成主动消息最大 token 数
 
 
+class WebSearchAPIConfig(Struct):
+    """自有 Web search API Provider 配置。"""
+
+    endpoint: str | None = None
+    method: str = "POST"
+    api_key: str | None = None
+    api_key_header: str = "Authorization"
+    api_key_prefix: str = "Bearer "
+    headers: dict[str, str] = field(default_factory=dict)
+    request_template: dict[str, Any] = field(default_factory=lambda: {"query": "{query}", "count": "{max_results}"})
+    query_params: dict[str, Any] = field(default_factory=dict)
+    results_path: str = "results"
+    title_path: str = "title"
+    url_path: str = "url"
+    snippet_path: str = "content"
+    published_at_path: str | None = None
+
+
+class WebSearchToolConfig(Struct):
+    """自有 Web search 工具配置。"""
+
+    enabled: bool = False
+    provider: str = "bing"  # bing / api / mixed
+    max_results: int = 10
+    timeout: int = 10
+    cache_ttl_seconds: int = 300
+    trigger_strategy: Literal["off", "explicit", "auto"] = "explicit"
+    freshness_keywords: list[str] = field(
+        default_factory=lambda: [
+            "今天",
+            "今日",
+            "现在",
+            "当前",
+            "最新",
+            "新闻",
+            "价格",
+            "版本",
+            "发布",
+            "更新",
+            "today",
+            "latest",
+            "news",
+            "price",
+            "version",
+        ]
+    )
+    prefer_for_characters: list[str] = field(default_factory=list)
+    prefer_for_scenarios: list[str] = field(default_factory=list)
+    user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    )
+    region: str | None = None
+    safe_search: str = "moderate"
+    snippet_max_length: int = 200
+    api: WebSearchAPIConfig = field(default_factory=WebSearchAPIConfig)
+
+
 class ToolConfig(Struct):
     """工具配置"""
 
     enabled: bool = True
     builtin_tools: list[str] = field(default_factory=lambda: ["time", "moon", "memory", "system"])
     custom_tools_path: Path | None = None
+    web_search: WebSearchToolConfig = field(default_factory=WebSearchToolConfig)
 
 
 class SessionConfig(Struct):
@@ -170,6 +257,7 @@ class ConfigLoader:
 
     def __init__(self):
         self._config: AppConfig | None = None
+        self._provided_fields: dict[int, set[str]] = {}
 
     def load(self, config_file: Path | None = None) -> AppConfig:
         """加载配置"""
@@ -201,7 +289,7 @@ class ConfigLoader:
         return self._dict_to_config(data)
 
     def _dict_to_config(self, data: dict[str, Any]) -> AppConfig:
-        """字典转配置对象"""
+        """字典转配置对象，并记录用户显式提供的字段。"""
         config = AppConfig()
 
         if "log_level" in data:
@@ -214,13 +302,16 @@ class ConfigLoader:
             config.debug_silent_output = bool(data["debug_silent_output"])
 
         if "model" in data:
-            config.model = ModelConfig(**data["model"])
+            model_data = data["model"] or {}
+            config.model = ModelConfig(**model_data)
+            self._provided_fields[id(config.model)] = set(model_data.keys())
         if "embedding" in data:
             config.embedding = EmbeddingConfig(**data["embedding"])
         if "memory" in data:
             config.memory = MemoryConfig(**data["memory"])
         if "tool" in data:
-            config.tool = ToolConfig(**data["tool"])
+            tool_data = data["tool"] or {}
+            config.tool = self._dict_to_tool_config(tool_data)
         if "session" in data:
             config.session = SessionConfig(**data["session"])
 
@@ -254,39 +345,92 @@ class ConfigLoader:
         return result
 
     def _merge_model(self, base: ModelConfig, override: ModelConfig) -> ModelConfig:
-        """合并模型配置 - override 优先"""
+        """合并模型配置 - override 优先。
+
+        从 YAML 加载的配置会保留字段出现信息，避免用默认值猜测用户是否有意覆盖；
+        对直接构造的 ModelConfig 仍保留旧的默认值回退策略以兼容现有调用。
+        """
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
         return ModelConfig(
-            provider=override.provider if override.provider != "ollama" else base.provider,
-            name=override.name if override.name != "qwen3.5:9b" else base.name,
-            base_url=override.base_url or base.base_url,
-            api_path=override.api_path or base.api_path,
-            api_key=override.api_key or base.api_key,
-            extra_headers=override.extra_headers or base.extra_headers,
-            stream=override.stream,
-            think=override.think,
-            thinking_enabled=(
+            provider=choose("provider", override.provider if override.provider != "ollama" else base.provider),
+            name=choose("name", override.name if override.name != "qwen3.5:9b" else base.name),
+            base_url=choose("base_url", override.base_url or base.base_url),
+            api_path=choose("api_path", override.api_path or base.api_path),
+            api_key=choose("api_key", override.api_key or base.api_key),
+            extra_headers=choose("extra_headers", override.extra_headers or base.extra_headers),
+            auth=choose("auth", override.auth or base.auth),
+            model_capabilities_add=choose(
+                "model_capabilities_add",
+                override.model_capabilities_add or base.model_capabilities_add,
+            ),
+            model_capabilities_remove=choose(
+                "model_capabilities_remove",
+                override.model_capabilities_remove or base.model_capabilities_remove,
+            ),
+            web_search_enabled=choose("web_search_enabled", override.web_search_enabled),
+            web_search_strategy=choose("web_search_strategy", override.web_search_strategy),
+            web_search_context_size=choose(
+                "web_search_context_size",
+                override.web_search_context_size or base.web_search_context_size,
+            ),
+            web_search_user_location=choose(
+                "web_search_user_location",
+                override.web_search_user_location or base.web_search_user_location,
+            ),
+            web_search_allow_fallback=choose("web_search_allow_fallback", override.web_search_allow_fallback),
+            web_search_metadata=choose(
+                "web_search_metadata",
+                override.web_search_metadata or base.web_search_metadata,
+            ),
+            stream=choose("stream", override.stream),
+            think=choose("think", override.think),
+            thinking_enabled=choose(
+                "thinking_enabled",
                 override.thinking_enabled
                 if override.thinking_enabled is not None
-                else base.thinking_enabled
+                else base.thinking_enabled,
             ),
-            reasoning_effort=override.reasoning_effort or base.reasoning_effort,
-            temperature=override.temperature if override.temperature != 0.7 else base.temperature,
-            top_p=override.top_p if override.top_p != 0.9 else base.top_p,
-            max_tokens=override.max_tokens if override.max_tokens != 2048 else base.max_tokens,
-            timeout=override.timeout if override.timeout != 60 else base.timeout,
-            use_proxy=override.use_proxy
-            if override.use_proxy != base.use_proxy
-            else base.use_proxy,
-            retry_max_attempts=override.retry_max_attempts
-            if override.retry_max_attempts != 3
-            else base.retry_max_attempts,
-            retry_initial_delay=override.retry_initial_delay
-            if override.retry_initial_delay != 1.0
-            else base.retry_initial_delay,
-            retry_backoff_factor=override.retry_backoff_factor
-            if override.retry_backoff_factor != 2.0
-            else base.retry_backoff_factor,
-            retry_status_codes=override.retry_status_codes or base.retry_status_codes,
+            reasoning_effort=choose("reasoning_effort", override.reasoning_effort or base.reasoning_effort),
+            temperature=choose(
+                "temperature",
+                override.temperature if override.temperature != 0.7 else base.temperature,
+            ),
+            top_p=choose("top_p", override.top_p if override.top_p != 0.9 else base.top_p),
+            max_tokens=choose(
+                "max_tokens",
+                override.max_tokens if override.max_tokens != 2048 else base.max_tokens,
+            ),
+            timeout=choose("timeout", override.timeout if override.timeout != 60 else base.timeout),
+            use_proxy=choose(
+                "use_proxy",
+                override.use_proxy if override.use_proxy != base.use_proxy else base.use_proxy,
+            ),
+            retry_max_attempts=choose(
+                "retry_max_attempts",
+                override.retry_max_attempts if override.retry_max_attempts != 3 else base.retry_max_attempts,
+            ),
+            retry_initial_delay=choose(
+                "retry_initial_delay",
+                override.retry_initial_delay
+                if override.retry_initial_delay != 1.0
+                else base.retry_initial_delay,
+            ),
+            retry_backoff_factor=choose(
+                "retry_backoff_factor",
+                override.retry_backoff_factor
+                if override.retry_backoff_factor != 2.0
+                else base.retry_backoff_factor,
+            ),
+            retry_status_codes=choose(
+                "retry_status_codes",
+                override.retry_status_codes or base.retry_status_codes,
+            ),
         )
 
     def _merge_embedding(self, base: EmbeddingConfig, override: EmbeddingConfig) -> EmbeddingConfig:
@@ -330,6 +474,71 @@ class ConfigLoader:
             else base.auto_memory_model,
         )
 
+    def _dict_to_tool_config(self, data: dict[str, Any]) -> ToolConfig:
+        """字典转工具配置，处理嵌套 Web search 配置。"""
+        tool_data = dict(data)
+        web_search_data = tool_data.pop("web_search", None)
+        if isinstance(web_search_data, dict):
+            api_data = web_search_data.pop("api", None)
+            web_search_config = WebSearchToolConfig(**web_search_data)
+            if isinstance(api_data, dict):
+                web_search_config.api = WebSearchAPIConfig(**api_data)
+            tool_data["web_search"] = web_search_config
+        return ToolConfig(**tool_data)
+
+    def _merge_web_search_api(
+        self,
+        base: WebSearchAPIConfig,
+        override: WebSearchAPIConfig,
+    ) -> WebSearchAPIConfig:
+        """合并 Web search API Provider 配置。"""
+        return WebSearchAPIConfig(
+            endpoint=override.endpoint or base.endpoint,
+            method=override.method if override.method != "POST" else base.method,
+            api_key=override.api_key or base.api_key,
+            api_key_header=override.api_key_header
+            if override.api_key_header != "Authorization"
+            else base.api_key_header,
+            api_key_prefix=override.api_key_prefix if override.api_key_prefix != "Bearer " else base.api_key_prefix,
+            headers=override.headers or base.headers,
+            request_template=override.request_template or base.request_template,
+            query_params=override.query_params or base.query_params,
+            results_path=override.results_path if override.results_path != "results" else base.results_path,
+            title_path=override.title_path if override.title_path != "title" else base.title_path,
+            url_path=override.url_path if override.url_path != "url" else base.url_path,
+            snippet_path=override.snippet_path if override.snippet_path != "content" else base.snippet_path,
+            published_at_path=override.published_at_path or base.published_at_path,
+        )
+
+    def _merge_web_search_tool(
+        self,
+        base: WebSearchToolConfig,
+        override: WebSearchToolConfig,
+    ) -> WebSearchToolConfig:
+        """合并自有 Web search 工具配置。"""
+        return WebSearchToolConfig(
+            enabled=override.enabled if override.enabled != base.enabled else base.enabled,
+            provider=override.provider if override.provider != "bing" else base.provider,
+            max_results=override.max_results if override.max_results != 10 else base.max_results,
+            timeout=override.timeout if override.timeout != 10 else base.timeout,
+            cache_ttl_seconds=override.cache_ttl_seconds
+            if override.cache_ttl_seconds != 300
+            else base.cache_ttl_seconds,
+            user_agent=override.user_agent if override.user_agent != WebSearchToolConfig().user_agent else base.user_agent,
+            trigger_strategy=override.trigger_strategy
+            if override.trigger_strategy != "explicit"
+            else base.trigger_strategy,
+            freshness_keywords=override.freshness_keywords or base.freshness_keywords,
+            prefer_for_characters=override.prefer_for_characters or base.prefer_for_characters,
+            prefer_for_scenarios=override.prefer_for_scenarios or base.prefer_for_scenarios,
+            region=override.region or base.region,
+            safe_search=override.safe_search if override.safe_search != "moderate" else base.safe_search,
+            snippet_max_length=override.snippet_max_length
+            if override.snippet_max_length != 200
+            else base.snippet_max_length,
+            api=self._merge_web_search_api(base.api, override.api),
+        )
+
     def _merge_tool(self, base: ToolConfig, override: ToolConfig) -> ToolConfig:
         """合并工具配置 - 修复覆盖逻辑"""
         return ToolConfig(
@@ -338,6 +547,7 @@ class ConfigLoader:
             if override.builtin_tools != base.builtin_tools
             else base.builtin_tools,
             custom_tools_path=override.custom_tools_path or base.custom_tools_path,
+            web_search=self._merge_web_search_tool(base.web_search, override.web_search),
         )
 
     def _merge_session(self, base: SessionConfig, override: SessionConfig) -> SessionConfig:
@@ -400,6 +610,24 @@ class ConfigLoader:
             config.model.base_url = os.getenv("GENSOKYOAI_BASE_URL")  # type: ignore
         if os.getenv("GENSOKYOAI_API_PATH"):
             config.model.api_path = os.getenv("GENSOKYOAI_API_PATH")  # type: ignore
+        if os.getenv("GENSOKYOAI_AUTH_TYPE"):
+            config.model.auth = config.model.auth or AuthConfig()
+            config.model.auth.auth_type = os.getenv("GENSOKYOAI_AUTH_TYPE")  # type: ignore
+        if os.getenv("GENSOKYOAI_TOKEN_URL"):
+            config.model.auth = config.model.auth or AuthConfig()
+            config.model.auth.token_url = os.getenv("GENSOKYOAI_TOKEN_URL")  # type: ignore
+        if os.getenv("GENSOKYOAI_ACCESS_TOKEN"):
+            config.model.auth = config.model.auth or AuthConfig()
+            config.model.auth.access_token = os.getenv("GENSOKYOAI_ACCESS_TOKEN")  # type: ignore
+        if os.getenv("GENSOKYOAI_REFRESH_TOKEN"):
+            config.model.auth = config.model.auth or AuthConfig()
+            config.model.auth.refresh_token = os.getenv("GENSOKYOAI_REFRESH_TOKEN")  # type: ignore
+        if os.getenv("GENSOKYOAI_CLIENT_ID"):
+            config.model.auth = config.model.auth or AuthConfig()
+            config.model.auth.client_id = os.getenv("GENSOKYOAI_CLIENT_ID")  # type: ignore
+        if os.getenv("GENSOKYOAI_CLIENT_SECRET"):
+            config.model.auth = config.model.auth or AuthConfig()
+            config.model.auth.client_secret = os.getenv("GENSOKYOAI_CLIENT_SECRET")  # type: ignore
         if os.getenv("GENSOKYOAI_RETRY_MAX_ATTEMPTS"):
             config.model.retry_max_attempts = int(os.getenv("GENSOKYOAI_RETRY_MAX_ATTEMPTS"))  # type: ignore
         if os.getenv("GENSOKYOAI_RETRY_INITIAL_DELAY"):

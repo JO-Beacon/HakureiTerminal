@@ -5,8 +5,10 @@
 from typing import TYPE_CHECKING
 
 from ...tools.registry import ToolRegistry
+from ...tools.build_service import ToolBuildResult
 
 if TYPE_CHECKING:
+    from ..config import ModelConfig, WebSearchToolConfig
     from ...memory.working import WorkingMemoryManager
     from ...memory.episodic import EpisodicMemoryManager
     from ...memory.semantic import SemanticMemoryManager
@@ -73,6 +75,10 @@ class MessageBuilder:
         semantic_memory: "SemanticMemoryManager",
         tool_registry: ToolRegistry | None = None,
         tool_enabled: bool = False,
+        character_name: str = "",
+        web_search_config: "WebSearchToolConfig | None" = None,
+        model_config: "ModelConfig | None" = None,
+        tool_build_result: ToolBuildResult | None = None,
     ):
         """
         初始化消息构建器
@@ -91,20 +97,33 @@ class MessageBuilder:
         self._semantic_memory = semantic_memory
         self._tool_registry = tool_registry
         self._tool_enabled = tool_enabled
+        self._character_name = character_name
+        self._web_search_config = web_search_config
+        self._model_config = model_config
+        self._tool_build_result = tool_build_result
 
     @property
     def system_prompt(self) -> str:
         """获取系统提示词（包含工具说明）"""
         prompt = self._system_prompt
 
-        # 添加工具说明
-        if self._tool_enabled and self._tool_registry:
+        # 添加 ToolBuildService 统一生成的工具说明；未接入时保持旧逻辑兼容。
+        if self._tool_build_result is not None:
+            if self._tool_build_result.instructions:
+                prompt += "\n\n" + self._tool_build_result.instructions
+        elif self._tool_enabled and self._tool_registry:
             if tools := self._tool_registry.list():
                 tools_desc = "\n\n【可用工具】\n"
                 tools_desc += "\n".join(f"- {t.name}: {t.description}" for t in tools)
                 prompt += tools_desc
                 prompt += (
                     "\n当需要获取外部信息时，请调用相应的工具。调用工具后，将结果整合到回复中。"
+                )
+
+            if self._provider_builtin_web_search_enabled():
+                prompt += (
+                    "\n\n【联网搜索策略】当前模型已启用 Provider 内置联网搜索；"
+                    "遇到需要实时信息的问题时，优先依赖模型内置搜索能力。"
                 )
 
         return prompt
@@ -147,10 +166,78 @@ class MessageBuilder:
                 }
             )
 
-        # 4. 工作记忆（当前对话）
+        # 4. 联网搜索触发策略提示（只引导模型调用工具，不在后端自动联网）
+        if hint := self._build_web_search_hint(user_input, system_contexts):
+            messages.append({"role": "system", "content": hint})
+
+        # 5. 工作记忆（当前对话）
         messages.extend(self._working_memory.get_context())
 
         return messages
+
+    def _provider_builtin_web_search_enabled(self) -> bool:
+        """当前模型是否配置为优先使用 Provider 内置搜索。"""
+        if not self._model_config:
+            return False
+        return bool(self._model_config.web_search_enabled and self._model_config.web_search_strategy != "off")
+
+    def _has_web_search_tool(self) -> bool:
+        if not self._tool_enabled or not self._tool_registry:
+            return False
+        return self._tool_registry.get("web_search") is not None
+
+    def _build_web_search_hint(
+        self,
+        user_input: str,
+        system_contexts: list[str] | None = None,
+    ) -> str:
+        """按工具配置、用户输入和场景上下文生成联网搜索引导。"""
+        config = self._web_search_config
+        if not config or not config.enabled or config.trigger_strategy == "off":
+            return ""
+        if self._provider_builtin_web_search_enabled() or not self._has_web_search_tool():
+            return ""
+
+        strategy = config.trigger_strategy
+        reasons: list[str] = []
+        text = user_input or ""
+        lower_text = text.lower()
+        matched_keyword = next(
+            (
+                keyword
+                for keyword in config.freshness_keywords
+                if keyword and keyword.lower() in lower_text
+            ),
+            "",
+        )
+        if matched_keyword:
+            reasons.append(f"问题包含时效性信号“{matched_keyword}”")
+
+        if self._character_name and self._character_name in config.prefer_for_characters:
+            reasons.append(f"角色策略要求 {self._character_name} 偏好联网核验")
+
+        combined_context = "\n".join(system_contexts or [])
+        matched_scenario = next(
+            (
+                scenario
+                for scenario in config.prefer_for_scenarios
+                if scenario and scenario.lower() in combined_context.lower()
+            ),
+            "",
+        )
+        if matched_scenario:
+            reasons.append(f"场景策略命中“{matched_scenario}”")
+
+        if strategy == "explicit" and not reasons:
+            return ""
+        if strategy == "auto" and not reasons:
+            reasons.append("自动策略允许在需要外部实时信息时主动搜索")
+
+        reason_text = "；".join(reasons)
+        return (
+            "【联网搜索策略】如果回答用户问题需要最新、当前、新闻、价格、版本、事实核验等外部实时信息，"
+            f"请优先调用 web_search 工具后再回答。触发依据：{reason_text}。"
+        )
 
     def build_continuation(self) -> list[dict[str, str]]:
         """
@@ -172,6 +259,10 @@ class MessageBuilder:
             }
         )
         return messages
+
+    def update_tool_build_result(self, tool_build_result: ToolBuildResult | None) -> None:
+        """更新工具构建结果。"""
+        self._tool_build_result = tool_build_result
 
     def update_system_prompt(self, system_prompt: str) -> None:
         """

@@ -3,7 +3,7 @@
 # GensokyoAI\background\manager.py
 
 import asyncio
-from typing import Callable, Awaitable
+from typing import TYPE_CHECKING, Callable, Awaitable
 
 from .types import (
     BackgroundTask,
@@ -15,6 +15,9 @@ from .types import (
 from .workers import PersistenceWorker
 from .workers.base import BaseWorker
 from ..utils.logger import logger
+
+if TYPE_CHECKING:
+    from ..core.events import EventBus
 
 
 class TaskContext:
@@ -42,7 +45,12 @@ class BackgroundManager:
     - 不处理具体业务逻辑
     """
 
-    def __init__(self, max_workers: int = 3, max_queue_size: int = 100):
+    def __init__(
+        self,
+        max_workers: int = 3,
+        max_queue_size: int = 100,
+        event_bus: "EventBus" | None = None,
+    ):
         self.max_workers = max_workers
         self.max_queue_size = max_queue_size
 
@@ -55,6 +63,7 @@ class BackgroundManager:
         self._stopping = False
         self._worker_tasks: list[asyncio.Task] = []
         self._result_callbacks: list[Callable[[TaskResult], Awaitable[None]]] = []
+        self._event_bus = event_bus
 
         self._stats = {
             "submitted": 0,
@@ -76,6 +85,10 @@ class BackgroundManager:
     def register_persistence_worker(self, worker: PersistenceWorker) -> "BackgroundManager":
         """注册持久化工作器"""
         return self.register_worker(TaskType.PERSISTENCE, worker)
+
+    def set_event_bus(self, event_bus: "EventBus") -> None:
+        """注入事件总线。"""
+        self._event_bus = event_bus
 
     # ==================== 回调注册 ====================
 
@@ -194,11 +207,55 @@ class BackgroundManager:
             f"丢弃: {stats['dropped']})"
         )
 
+    def _publish_worker_event(
+        self,
+        status: str,
+        worker_id: int,
+        *,
+        task: BackgroundTask | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        if self._event_bus is None:
+            return
+        from ..core.events import Event, SystemEvent
+        from ..runtime.event_contract import sanitize_event_payload
+
+        if status == "started":
+            event_type = SystemEvent.BACKGROUND_WORKER_STARTED
+        elif status == "idle":
+            event_type = SystemEvent.BACKGROUND_WORKER_IDLE
+        else:
+            event_type = SystemEvent.BACKGROUND_WORKER_FAILED
+
+        data: dict = {
+            "worker_id": worker_id,
+            "queue_size": self._task_queue.qsize(),
+        }
+        if task is not None:
+            data.update(
+                {
+                    "task_id": task.id,
+                    "task_name": task.name,
+                    "task_type": task.type.name,
+                }
+            )
+        if error is not None:
+            data.update({"error": str(error), "error_type": type(error).__name__})
+
+        self._event_bus.publish(
+            Event(
+                type=event_type,
+                source="background_manager",
+                data=sanitize_event_payload(data),
+            )
+        )
+
     # ==================== 工作循环 ====================
 
     async def _worker_loop(self, worker_id: int) -> None:
         """工作器循环 - 使用上下文管理器自动处理 task_done"""
         logger.debug(f"工作器 {worker_id} 已启动")
+        self._publish_worker_event("started", worker_id)
 
         while self._running:
             try:
@@ -218,11 +275,15 @@ class BackgroundManager:
                             except Exception as e:
                                 logger.warning(f"回调执行失败: {e}")
 
+                        if self._task_queue.empty():
+                            self._publish_worker_event("idle", worker_id)
+
                     except asyncio.CancelledError:
                         logger.debug(f"工作器 {worker_id} 任务被取消")
                         raise
                     except Exception as e:
                         logger.error(f"任务执行异常: {e}")
+                        self._publish_worker_event("failed", worker_id, task=task, error=e)
 
             except asyncio.CancelledError:
                 logger.debug(f"工作器 {worker_id} 已取消")
@@ -231,6 +292,7 @@ class BackgroundManager:
                 continue
             except Exception as e:
                 logger.error(f"工作器 {worker_id} 发生未预期异常: {e}")
+                self._publish_worker_event("failed", worker_id, error=e)
                 continue
 
         logger.debug(f"工作器 {worker_id} 已停止")
