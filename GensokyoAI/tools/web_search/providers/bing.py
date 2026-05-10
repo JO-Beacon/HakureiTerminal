@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import html
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+
+import aiohttp
 
 from .base import WebSearchProvider
 from ..types import ProviderSearchResult, SearchItem
@@ -148,7 +148,7 @@ class BingSearchProvider(WebSearchProvider):
     async def search(self, query: str, *, max_results: int | None = None) -> ProviderSearchResult:
         limit = max_results or self.config.max_results
         try:
-            body = await asyncio.to_thread(self._fetch, "https://www.bing.com/search", {"q": query})
+            body = await self._fetch("https://www.bing.com/search", {"q": query})
             parser = _GenericResultHTMLParser("https://www.bing.com/search")
             parser.feed(body)
             items = self._items_from_candidates(parser.candidates, parser.text_chunks, limit)
@@ -156,16 +156,17 @@ class BingSearchProvider(WebSearchProvider):
         except Exception as e:
             return ProviderSearchResult(provider=self.name, status="failed", error=str(e))
 
-    def _fetch(self, url: str, params: dict[str, str]) -> str:
+    async def _fetch(self, url: str, params: dict[str, str]) -> str:
         full_url = f"{url}?{urlencode(params)}"
         headers = {
             "User-Agent": self.config.user_agent,
             "Accept-Language": self.config.region or "zh-CN,zh;q=0.9,en;q=0.7",
             "Referer": "https://www.bing.com/",
         }
-        with urlopen(Request(full_url, headers=headers), timeout=self.config.timeout) as response:
-            data = response.read()
-            return data.decode("utf-8", errors="replace")
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(full_url, headers=headers) as response:
+                return await response.text(encoding="utf-8", errors="replace")
 
     @staticmethod
     def _items_from_candidates(

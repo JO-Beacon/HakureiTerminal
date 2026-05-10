@@ -1,4 +1,5 @@
 # requirements.txt
+aiohttp>=3.9     # 异步 HTTP 客户端
 # ===== 核心依赖 =====
 msgspec          # 高性能序列化
 loguru           # 日志系统

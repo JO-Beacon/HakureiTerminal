@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+
+import aiohttp
 
 from ....core.agent.providers.request_utils import sanitize_response_body
 from .base import WebSearchProvider
@@ -33,7 +32,7 @@ class GenericAPISearchProvider(WebSearchProvider):
                 query=query,
                 max_results=max_results or self.config.max_results,
             )
-            data = await asyncio.to_thread(self._request_json, payload, params)
+            data = await self._request_json(payload, params)
             raw_items = self._get_path(data, self.config.api.results_path)
             if not isinstance(raw_items, list):
                 return ProviderSearchResult(
@@ -47,7 +46,7 @@ class GenericAPISearchProvider(WebSearchProvider):
         except Exception as e:
             return ProviderSearchResult(provider=self.name, status="failed", error=str(e))
 
-    def _request_json(self, payload: dict[str, Any], params: dict[str, Any]) -> Any:
+    async def _request_json(self, payload: dict[str, Any], params: dict[str, Any]) -> Any:
         api_config = self.config.api
         method = api_config.method.upper()
         endpoint = api_config.endpoint or ""
@@ -59,16 +58,16 @@ class GenericAPISearchProvider(WebSearchProvider):
             headers[api_config.api_key_header] = f"{api_config.api_key_prefix}{api_config.api_key}"
 
         body = None if method == "GET" else json.dumps(payload).encode("utf-8")
-        request = Request(endpoint, data=body, headers=headers, method=method)
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout)
         try:
-            with urlopen(request, timeout=self.config.timeout) as response:
-                text = response.read().decode("utf-8", errors="replace")
-        except HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="replace")
-            sanitized = sanitize_response_body(e.code, error_body)
-            raise RuntimeError(f"API 搜索 HTTP {e.code}: {sanitized}") from e
-        except URLError as e:
-            raise RuntimeError(f"API 搜索网络错误: {e.reason}") from e
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.request(method, endpoint, data=body, headers=headers) as response:
+                    text = await response.text(encoding="utf-8", errors="replace")
+                    if response.status >= 400:
+                        sanitized = sanitize_response_body(response.status, text)
+                        raise RuntimeError(f"API 搜索 HTTP {response.status}: {sanitized}")
+        except aiohttp.ClientError as e:
+            raise RuntimeError(f"API 搜索网络错误: {e}") from e
         try:
             return json.loads(text)
         except json.JSONDecodeError as e:
