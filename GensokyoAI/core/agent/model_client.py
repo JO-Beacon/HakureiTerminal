@@ -18,7 +18,7 @@ from .types import (
 )
 from .providers import ProviderFactory, BaseProvider
 from .providers.auth_utils import AuthRefreshError, sanitize_auth_data
-from .providers.request_utils import ModelAPIError, is_retryable_error, normalize_model_error
+from ...utils.request_utils import ModelAPIError, is_retryable_error, normalize_model_error
 from ..config import EmbeddingConfig, ModelConfig
 from ..exceptions import ModelError
 from ..events import Event, SystemEvent, EventBus

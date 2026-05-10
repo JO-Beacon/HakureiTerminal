@@ -9,7 +9,7 @@ import json
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import BaseProvider
-from .request_utils import merge_headers
+from ....utils.request_utils import merge_headers
 from ..types import (
     ImageInput,
     MessageContentPart,

@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 
-from ....core.agent.providers.request_utils import sanitize_response_body
+from ....utils.request_utils import sanitize_response_body
 from .base import WebSearchProvider
 from ..types import ProviderSearchResult, SearchItem
 

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
 from ...core.config import WebSearchToolConfig
+from ...utils.request_utils import normalize_search_url
 from .providers.api import GenericAPISearchProvider
 from .providers.bing import BingSearchProvider
 from .providers.base import WebSearchProvider
@@ -136,7 +135,7 @@ class WebSearchService:
         seen: set[str] = set()
         unique: list[SearchItem] = []
         for item in items:
-            key = self._normalize_url(item.url)
+            key = normalize_search_url(item.url)
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -144,21 +143,6 @@ class WebSearchService:
                 item.snippet = item.snippet[: self.config.snippet_max_length].rstrip() + "..."
             unique.append(item)
         return unique
-
-    @staticmethod
-    def _normalize_url(url: str) -> str:
-        try:
-            parts = urlsplit(url)
-            query = urlencode(
-                [
-                    (key, value)
-                    for key, value in parse_qsl(parts.query, keep_blank_values=True)
-                    if not key.lower().startswith("utm_")
-                ]
-            )
-            return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), query, ""))
-        except Exception:
-            return url
 
     def _get_cached(self, key: str) -> WebSearchResult | None:
         if self.config.cache_ttl_seconds <= 0:

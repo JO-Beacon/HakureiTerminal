@@ -18,7 +18,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import BaseProvider
 from .openai_provider import OpenAIProvider
-from .request_utils import (
+from ....utils.request_utils import (
     ModelAPIError,
     endpoint_url,
     has_arbitrary_api_path,

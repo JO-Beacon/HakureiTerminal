@@ -1,10 +1,13 @@
+import asyncio
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from GensokyoAI.core.agent.providers.request_utils import (
+from GensokyoAI.utils.request_utils import (
     ModelAPIError,
     is_html_response,
     normalize_openai_api_host_and_path,
     normalize_openai_responses_host_and_path,
+    normalize_search_url,
     post_sse,
     sanitize_response_body,
 )
@@ -50,40 +53,58 @@ class RequestUtilsTests(unittest.TestCase):
 
 
     def test_post_sse_reports_invalid_json_with_event_diagnostics(self):
-        class _FakeResponse:
-            def __enter__(self):
-                return self
+        mock_readline = AsyncMock()
+        mock_readline.side_effect = [
+            b": keepalive\n",
+            b"event: message\n",
+            b"data: {bad json}\n",
+            b"\n",
+            b"",
+        ]
 
-            def __exit__(self, exc_type, exc, tb):
-                return False
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.content.readline = mock_readline
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
 
-            def __iter__(self):
-                return iter(
-                    [
-                        b": keepalive\n",
-                        b"event: message\n",
-                        b"data: {bad json}\n",
-                        b"\n",
-                    ]
-                )
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_response)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with unittest.mock.patch(
-            "GensokyoAI.core.agent.providers.request_utils.urlopen",
-            return_value=_FakeResponse(),
-        ):
+        with patch("GensokyoAI.utils.request_utils.aiohttp.ClientSession", return_value=mock_session):
             async def collect():
                 async for _ in post_sse("https://api.example.test/sse", {}, {}, 1):
                     pass
 
             with self.assertRaises(ModelAPIError) as cm:
-                import asyncio
-
                 asyncio.run(collect())
 
         self.assertIn("SSE JSON 解析失败", str(cm.exception))
         self.assertIn("event_index=1", str(cm.exception))
         self.assertIn("ignored_lines=1", str(cm.exception))
         self.assertEqual(cm.exception.response_body, "{bad json}")
+
+    def test_normalize_search_url_dedup_utm_and_trailing_slash(self):
+        self.assertEqual(
+            normalize_search_url("https://example.test/a?utm_source=x"),
+            "https://example.test/a",
+        )
+        self.assertEqual(
+            normalize_search_url("https://example.test/path/"),
+            "https://example.test/path",
+        )
+        self.assertEqual(
+            normalize_search_url("https://example.test/a?b=1&utm_source=x"),
+            "https://example.test/a?b=1",
+        )
+
+    def test_normalize_search_url_handles_html_escaped_chars(self):
+        self.assertEqual(
+            normalize_search_url("https://example.test/a&amp;b"),
+            "https://example.test/a&b",
+        )
 
 
 if __name__ == "__main__":

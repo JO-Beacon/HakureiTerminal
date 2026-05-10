@@ -7,9 +7,10 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
-from urllib.parse import urlsplit, urlunsplit
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+import html as _html
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import aiohttp
 
 
 HTTP_STATUS_MESSAGES: dict[int, str] = {
@@ -134,6 +135,22 @@ def normalize_openai_api_host_and_path(
 def endpoint_url(endpoint: NormalizedEndpoint) -> str:
     """拼接规范化 endpoint 的完整 URL。"""
     return f"{endpoint.api_host}{endpoint.api_path}"
+
+
+def normalize_search_url(url: str) -> str:
+    """规范化搜索结果的 URL 用于去重：小写 scheme/host，去尾斜杠，移除 utm_* 参数。"""
+    try:
+        parts = urlsplit(_html.unescape(url).strip())
+        query = urlencode(
+            [
+                (key, value)
+                for key, value in parse_qsl(parts.query, keep_blank_values=True)
+                if not key.lower().startswith("utm_")
+            ]
+        )
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), query, ""))
+    except Exception:
+        return url
 
 
 def has_arbitrary_api_path(endpoint: NormalizedEndpoint, default_path: str) -> bool:
@@ -265,36 +282,30 @@ def merge_headers(*headers: dict[str, Any] | None) -> dict[str, str]:
     return merged
 
 
-def _post_json_sync(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float | None) -> dict[str, Any]:
+async def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float | None = None) -> dict[str, Any]:
+    """异步执行 JSON POST；用于 SDK 无法表达任意 api_path 的场景。"""
     request_headers = {"Content-Type": "application/json", **headers}
-    data = json.dumps(payload).encode("utf-8")
-    request = Request(url, data=data, headers=request_headers, method="POST")
+    timeout_obj = aiohttp.ClientTimeout(total=timeout)
     try:
-        with urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-            return json.loads(raw) if raw else {}
-    except HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
+        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+            async with session.post(url, json=payload, headers=request_headers) as response:
+                raw = await response.text(encoding="utf-8", errors="replace")
+                if response.status >= 400:
+                    raise ModelAPIError(
+                        f"API 状态码 {response.status} ({HTTP_STATUS_MESSAGES.get(response.status, f'HTTP {response.status}')}): {sanitize_response_body(response.status, raw)}",
+                        status_code=response.status,
+                        response_body=sanitize_response_body(response.status, raw) or raw,
+                        endpoint=url,
+                        retryable=response.status in DEFAULT_RETRY_STATUS_CODES,
+                    )
+                return json.loads(raw) if raw else {}
+    except aiohttp.ClientError as e:
         raise ModelAPIError(
-            f"API 状态码 {e.code} ({HTTP_STATUS_MESSAGES.get(e.code, f'HTTP {e.code}')}): {sanitize_response_body(e.code, body)}",
-            status_code=e.code,
-            response_body=sanitize_response_body(e.code, body) or body,
-            endpoint=url,
-            retryable=e.code in DEFAULT_RETRY_STATUS_CODES,
-            original_error=e,
-        ) from e
-    except URLError as e:
-        raise ModelAPIError(
-            f"网络请求失败: {e.reason}",
+            f"网络请求失败: {e}",
             endpoint=url,
             retryable=False,
             original_error=e,
         ) from e
-
-
-async def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float | None = None) -> dict[str, Any]:
-    """异步执行 JSON POST；用于 SDK 无法表达任意 api_path 的场景。"""
-    return await asyncio.to_thread(_post_json_sync, url, payload, headers, timeout)
 
 
 def _preview_text(value: str, limit: int = 500) -> str:
@@ -305,90 +316,79 @@ def _preview_text(value: str, limit: int = 500) -> str:
     return compact[:limit] + "..."
 
 
-def _iter_sse_sync(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float | None):
+async def post_sse(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float | None = None) -> AsyncIterator[dict[str, Any]]:
+    """异步执行 SSE POST，并逐条产出 JSON data。"""
     request_headers = {"Content-Type": "application/json", "Accept": "text/event-stream", **headers}
-    data = json.dumps(payload).encode("utf-8")
-    request = Request(url, data=data, headers=request_headers, method="POST")
+    timeout_obj = aiohttp.ClientTimeout(total=timeout)
     try:
-        with urlopen(request, timeout=timeout) as response:
-            event_lines: list[str] = []
-            ignored_lines = 0
-            event_index = 0
-            for line_number, raw_line in enumerate(response, start=1):
-                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                stripped = line.strip()
-                if not stripped:
-                    if event_lines:
-                        event_index += 1
-                        yield {
-                            "data": "\n".join(event_lines),
-                            "event_index": event_index,
-                            "line_number": line_number,
-                            "ignored_lines": ignored_lines,
-                        }
-                        event_lines = []
-                    continue
-                if stripped.startswith(":"):
-                    continue
-                if stripped.startswith("data:"):
-                    event_lines.append(stripped[5:].strip())
-                    continue
-                ignored_lines += 1
-            if event_lines:
-                event_index += 1
-                yield {
-                    "data": "\n".join(event_lines),
-                    "event_index": event_index,
-                    "line_number": line_number if "line_number" in locals() else 0,
-                    "ignored_lines": ignored_lines,
-                    "eof_without_blank_line": True,
-                }
-    except HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
+        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+            async with session.post(url, json=payload, headers=request_headers) as response:
+                if response.status >= 400:
+                    raw = await response.text(encoding="utf-8", errors="replace")
+                    raise ModelAPIError(
+                        f"API 状态码 {response.status} ({HTTP_STATUS_MESSAGES.get(response.status, f'HTTP {response.status}')}): {sanitize_response_body(response.status, raw)}",
+                        status_code=response.status,
+                        response_body=sanitize_response_body(response.status, raw) or raw,
+                        endpoint=url,
+                        retryable=response.status in DEFAULT_RETRY_STATUS_CODES,
+                    )
+                event_lines: list[str] = []
+                ignored_lines = 0
+                event_index = 0
+                line_number = 0
+                while True:
+                    line_bytes = await response.content.readline()
+                    if not line_bytes:
+                        break
+                    line_number += 1
+                    line = line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
+                    stripped = line.strip()
+                    if not stripped:
+                        if event_lines:
+                            event_index += 1
+                            for event in _parse_sse_event(event_lines, event_index, line_number, ignored_lines):
+                                yield event
+                            event_lines = []
+                        continue
+                    if stripped.startswith(":"):
+                        continue
+                    if stripped.startswith("data:"):
+                        event_lines.append(stripped[5:].strip())
+                        continue
+                    ignored_lines += 1
+                if event_lines:
+                    event_index += 1
+                    for event in _parse_sse_event(event_lines, event_index, line_number, ignored_lines):
+                        yield event
+    except aiohttp.ClientError as e:
         raise ModelAPIError(
-            f"API 状态码 {e.code} ({HTTP_STATUS_MESSAGES.get(e.code, f'HTTP {e.code}')}): {sanitize_response_body(e.code, body)}",
-            status_code=e.code,
-            response_body=sanitize_response_body(e.code, body) or body,
-            endpoint=url,
-            retryable=e.code in DEFAULT_RETRY_STATUS_CODES,
-            original_error=e,
-        ) from e
-    except URLError as e:
-        raise ModelAPIError(
-            f"网络请求失败: {e.reason}",
+            f"网络请求失败: {e}",
             endpoint=url,
             retryable=False,
             original_error=e,
         ) from e
 
 
-async def post_sse(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float | None = None) -> AsyncIterator[dict[str, Any]]:
-    """异步执行 SSE POST，并逐条产出 JSON data。"""
-    iterator = _iter_sse_sync(url, payload, headers, timeout)
-    while True:
-        try:
-            event = await asyncio.to_thread(next, iterator)
-        except StopIteration:
-            break
-        event_data = event.get("data", "") if isinstance(event, dict) else str(event)
-        if event_data == "[DONE]":
-            break
-        if not event_data:
-            continue
-        try:
-            yield json.loads(event_data)
-        except json.JSONDecodeError as e:
-            event_index = event.get("event_index") if isinstance(event, dict) else None
-            line_number = event.get("line_number") if isinstance(event, dict) else None
-            ignored_lines = event.get("ignored_lines") if isinstance(event, dict) else None
-            detail = (
-                f"SSE JSON 解析失败: event_index={event_index}, line={line_number}, "
-                f"ignored_lines={ignored_lines}, pos={e.pos}, preview={_preview_text(event_data)!r}"
-            )
-            raise ModelAPIError(
-                detail,
-                endpoint=url,
-                response_body=_preview_text(event_data),
-                retryable=False,
-                original_error=e,
-            ) from e
+def _parse_sse_event(
+    event_lines: list[str],
+    event_index: int,
+    line_number: int,
+    ignored_lines: int,
+) -> list[dict[str, Any]]:
+    """将 SSE data 行解析为 JSON 事件列表。"""
+    event_data = "\n".join(event_lines)
+    if event_data == "[DONE]" or not event_data:
+        return []
+    try:
+        return [json.loads(event_data)]
+    except json.JSONDecodeError as e:
+        detail = (
+            f"SSE JSON 解析失败: event_index={event_index}, line={line_number}, "
+            f"ignored_lines={ignored_lines}, pos={e.pos}, preview={_preview_text(event_data)!r}"
+        )
+        raise ModelAPIError(
+            detail,
+            response_body=_preview_text(event_data),
+            retryable=False,
+            original_error=e,
+        ) from e

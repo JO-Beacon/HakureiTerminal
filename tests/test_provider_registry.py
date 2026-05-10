@@ -25,7 +25,9 @@ class InvalidProvider:
 
 class ProviderRegistryTests(unittest.TestCase):
     def test_builtin_definitions_have_unique_ids_and_complete_control_plane_metadata(self):
-        definitions = ProviderFactory.get_all_provider_definitions()
+        definitions = {
+            k: v for k, v in ProviderFactory.get_all_provider_definitions().items() if v.builtin
+        }
         self.assertEqual(len(definitions), len(set(definitions)))
 
         for provider_id, definition in definitions.items():

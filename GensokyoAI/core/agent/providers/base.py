@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import AsyncIterator, TYPE_CHECKING
 
 from .auth_utils import TokenRefreshManager
-from .request_utils import merge_headers
+from ....utils.request_utils import merge_headers
 from ..types import ProviderCapability
 
 if TYPE_CHECKING:

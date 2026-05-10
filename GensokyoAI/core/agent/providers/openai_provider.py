@@ -15,7 +15,7 @@
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import BaseProvider
-from .request_utils import (
+from ....utils.request_utils import (
     endpoint_url,
     has_arbitrary_api_path,
     merge_headers,

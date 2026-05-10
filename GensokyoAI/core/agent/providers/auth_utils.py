@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-import urllib.parse
-import urllib.request
 from typing import Any, TYPE_CHECKING
+from urllib.parse import urlencode
 
-from .request_utils import merge_headers
+import aiohttp
+
+from ....utils.request_utils import merge_headers
 
 if TYPE_CHECKING:
     from ...config import AuthConfig
@@ -61,7 +62,7 @@ class TokenRefreshManager:
         async with self._lock:
             if not self.needs_refresh(force=force):
                 return self.auth_config.access_token
-            return await asyncio.to_thread(self._refresh_sync)
+            return await self._refresh()
 
     def auth_headers(self) -> dict[str, str]:
         """根据当前 token 生成认证请求头。"""
@@ -71,7 +72,7 @@ class TokenRefreshManager:
             return {"Authorization": f"Bearer {self.auth_config.access_token}"}
         return {}
 
-    def _refresh_sync(self) -> str:
+    async def _refresh(self) -> str:
         if not self.auth_config.token_url:
             raise AuthRefreshError("未配置 auth.token_url，无法刷新 token")
 
@@ -86,21 +87,22 @@ class TokenRefreshManager:
         if self.auth_config.scope:
             body.setdefault("scope", self.auth_config.scope)
 
-        data = urllib.parse.urlencode(body).encode("utf-8")
-        request = urllib.request.Request(
-            self.auth_config.token_url,
-            data=data,
-            headers=merge_headers(
-                {"Content-Type": "application/x-www-form-urlencoded"},
-                self.auth_config.auth_headers,
-            ),
-            method="POST",
+        headers = merge_headers(
+            {"Content-Type": "application/x-www-form-urlencoded"},
+            self.auth_config.auth_headers,
         )
-
+        timeout = aiohttp.ClientTimeout(total=30)
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                raw = response.read().decode("utf-8")
-        except Exception as e:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    self.auth_config.token_url,
+                    data=urlencode(body),
+                    headers=headers,
+                ) as response:
+                    raw = await response.text(encoding="utf-8")
+                    if response.status >= 400:
+                        raise AuthRefreshError(f"刷新 token 请求失败: HTTP {response.status}")
+        except aiohttp.ClientError as e:
             raise AuthRefreshError(f"刷新 token 请求失败: {e}") from e
 
         try:

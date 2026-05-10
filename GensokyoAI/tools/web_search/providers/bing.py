@@ -6,10 +6,11 @@ import html
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 import aiohttp
 
+from ....utils.request_utils import normalize_search_url
 from .base import WebSearchProvider
 from ..types import ProviderSearchResult, SearchItem
 
@@ -110,19 +111,6 @@ def _is_probably_content_url(url: str) -> bool:
     return True
 
 
-def _canonical_url(url: str) -> str:
-    """生成用于去重的 URL。"""
-    parts = urlsplit(html.unescape(url).strip())
-    query = urlencode(
-        [
-            (key, value)
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if not key.lower().startswith("utm_")
-        ]
-    )
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), query, ""))
-
-
 def _make_snippet(candidate: _LinkCandidate, text_chunks: list[str], *, max_length: int = 220) -> str:
     """用链接附近的可见文本合成摘要。"""
     start = max(candidate.text_index - 1, 0)
@@ -180,7 +168,7 @@ class BingSearchProvider(WebSearchProvider):
             title = _normalize_text(candidate.title)
             if len(title) < 2 or len(title) > 180:
                 continue
-            canonical = _canonical_url(candidate.url)
+            canonical = normalize_search_url(candidate.url)
             if not _is_probably_content_url(canonical) or canonical in seen:
                 continue
             seen.add(canonical)

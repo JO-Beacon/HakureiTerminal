@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from .openai_provider import OpenAIProvider
-from .request_utils import merge_headers
+from ....utils.request_utils import merge_headers
 from ..types import ModelInfo, ProviderCapability
 from ....utils.logger import logger
 
