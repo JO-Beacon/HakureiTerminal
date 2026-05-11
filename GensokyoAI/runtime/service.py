@@ -585,10 +585,17 @@ class RuntimeService:
     def _resolve_optional(self, value: str | None) -> Path | None:
         if not value:
             return None
+        return self._resolve_sandboxed_path(value)
+
+    def _resolve_sandboxed_path(self, value: str) -> Path:
         path = Path(value)
         if not path.is_absolute():
             path = self.state.root_dir / path
-        return path.resolve()
+        resolved = path.resolve()
+        root = self.state.root_dir.resolve()
+        if resolved != root and not resolved.is_relative_to(root):
+            raise ValueError(f"Path is outside Runtime root directory: {value}")
+        return resolved
 
     def _resolve_character(self, character_path: str | None, character: str | None) -> Path | None:
         if character_path:
@@ -606,7 +613,7 @@ class RuntimeService:
         ]
         for candidate in candidates:
             if candidate.exists():
-                return candidate.resolve()
+                return self._resolve_sandboxed_path(str(candidate))
         raise FileNotFoundError(f"Character not found: {character}")
 
     def _character_payload(self, path: Path | None, name: str | None = None) -> dict[str, Any]:

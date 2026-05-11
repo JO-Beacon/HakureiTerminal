@@ -4,7 +4,7 @@ import unittest
 from typing import Any, cast
 
 from aiohttp import WSMsgType
-from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
+from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer, unittest_run_loop
 
 from GensokyoAI.core.events import Event, EventBus, SystemEvent
 from GensokyoAI.runtime.http_adapter import (
@@ -265,15 +265,16 @@ class RuntimeHttpAdapterAppTests(AioHTTPTestCase):
                 }
             )
         )
-        cancel_ack_message = await ws.receive(timeout=2)
-        cancel_ack = json.loads(cancel_ack_message.data)
-        cancelled_message = await ws.receive(timeout=2)
-        cancelled_frame = json.loads(cancelled_message.data)
+        frame_a = json.loads((await ws.receive(timeout=2)).data)
+        frame_b = json.loads((await ws.receive(timeout=2)).data)
         await ws.close()
 
+        frames = [frame_a, frame_b]
+        cancel_ack = next(frame for frame in frames if frame.get("id") == "cancel-1")
+        cancelled_frame = next(frame for frame in frames if frame.get("stream_id") == "stream-xyz")
         self.assertTrue(cancel_ack["ok"])
-        self.assertEqual(cancel_ack["result"], {"stream_id": "stream-xyz", "cancel_requested": True})
-        self.assertEqual(cancelled_frame["stream_id"], "stream-xyz")
+        self.assertEqual(cancel_ack["result"]["stream_id"], "stream-xyz")
+        self.assertTrue(cancel_ack["result"]["cancel_requested"])
         self.assertEqual(cancelled_frame["event"]["type"], "cancelled")
 
     @unittest_run_loop
@@ -402,6 +403,50 @@ class RuntimeHttpAdapterAppTests(AioHTTPTestCase):
         self.assertEqual(payload["data"], {"name": "search"})
         self.assertEqual(blank_line.decode(), "\n")
         self.assertEqual(self.fake_service.event_bus.stats["subscriber_count"], 0)
+
+    @unittest_run_loop
+    async def test_rpc_requires_token_when_auth_enabled(self):
+        server = TestServer(create_app(service=cast(Any, FakeHttpRuntimeService()), auth_token="secret"))
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            denied = await client.post(
+                "/rpc",
+                json={"id": 1, "method": "runtime.health", "params": {}},
+            )
+            allowed = await client.post(
+                "/rpc",
+                headers={"Authorization": "Bearer secret"},
+                json={"id": 2, "method": "runtime.health", "params": {}},
+            )
+            denied_payload = await denied.json()
+            allowed_payload = await allowed.json()
+        finally:
+            await client.close()
+
+        self.assertEqual(denied.status, 400)
+        self.assertFalse(denied_payload["ok"])
+        self.assertEqual(allowed.status, 200)
+        self.assertTrue(allowed_payload["ok"])
+
+    @unittest_run_loop
+    async def test_origin_allowlist_rejects_cross_origin_request(self):
+        server = TestServer(
+            create_app(
+                service=cast(Any, FakeHttpRuntimeService()),
+                allowed_origins=["https://allowed.example"],
+            )
+        )
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            denied = await client.get("/health", headers={"Origin": "https://evil.example"})
+            allowed = await client.get("/health", headers={"Origin": "https://allowed.example"})
+        finally:
+            await client.close()
+
+        self.assertEqual(denied.status, 403)
+        self.assertEqual(allowed.status, 200)
 
     @unittest_run_loop
     async def test_cleanup_shuts_down_runtime_service(self):

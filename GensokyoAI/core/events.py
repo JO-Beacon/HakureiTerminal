@@ -1,6 +1,7 @@
 """事件系统 - 解耦所有组件"""
 
 import asyncio
+from collections.abc import Iterable
 from typing import Callable, Any, Optional
 from enum import Enum
 from datetime import datetime
@@ -151,20 +152,42 @@ class Subscription:
 class EventBus:
     """事件总线 - 完全解耦的发布订阅，带完整追踪日志"""
 
-    def __init__(self, enable_trace: bool = True):
+    def __init__(
+        self,
+        enable_trace: bool = True,
+        *,
+        max_queue_size: int = 1000,
+        stop_drain_timeout: float = 5.0,
+        critical_events: Iterable[SystemEvent] | None = None,
+    ):
         self._subscribers: dict[SystemEvent, list[Subscription]] = {}
         self._lock = asyncio.Lock()
         self._running = False
-        self._event_queue: asyncio.Queue[Event] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=max_queue_size)
         self._worker_task: Optional[asyncio.Task] = None
         self._stats = {
             "published": 0,
             "delivered": 0,
             "errors": 0,
             "filtered": 0,
+            "dropped": 0,
+            "critical_flushed": 0,
         }
 
         self.enable_trace = enable_trace
+        self._max_queue_size = max_queue_size
+        self._stop_drain_timeout = stop_drain_timeout
+        self._critical_events = set(
+            critical_events
+            or {
+                SystemEvent.PERSISTENCE_SAVE_STARTED,
+                SystemEvent.PERSISTENCE_SAVE_COMPLETED,
+                SystemEvent.PERSISTENCE_SAVE_FAILED,
+                SystemEvent.ERROR_OCCURRED,
+                SystemEvent.AGENT_SHUTDOWN,
+                SystemEvent.AGENT_SHUTDOWN_COMPLETE,
+            }
+        )
 
         # 请求-响应机制
         self._pending_requests: dict[str, asyncio.Future] = {}
@@ -196,12 +219,9 @@ class EventBus:
                 future.set_exception(asyncio.CancelledError("EventBus stopped"))
         self._pending_requests.clear()
 
-        if self._worker_task and not self._worker_task.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(self._worker_task), timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
+        await self.flush_critical(timeout=self._stop_drain_timeout)
 
+        if self._worker_task and not self._worker_task.done():
             self._worker_task.cancel()
             try:
                 await self._worker_task
@@ -224,6 +244,29 @@ class EventBus:
                 f"过滤 {self._stats['filtered']}, "
                 f"错误 {self._stats['errors']}"
             )
+
+    async def flush_critical(self, timeout: float | None = None) -> None:
+        """尽量在停机前处理关键事件，避免保存/错误等事件直接丢弃。"""
+        if self._event_queue.empty():
+            return
+        deadline = asyncio.get_running_loop().time() + (timeout or self._stop_drain_timeout)
+        while not self._event_queue.empty() and asyncio.get_running_loop().time() < deadline:
+            try:
+                event = self._event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            try:
+                if event.type in self._critical_events:
+                    await self._process_event(event)
+                    self._stats["critical_flushed"] += 1
+                else:
+                    await self._event_queue.put(event)
+                    break
+            finally:
+                try:
+                    self._event_queue.task_done()
+                except ValueError:
+                    pass
 
     async def _event_worker(self) -> None:
         """事件处理工作器"""
@@ -312,6 +355,7 @@ class EventBus:
                 self._event_queue.put_nowait(event)
                 self._stats["published"] += 1
             except asyncio.QueueFull:
+                self._stats["dropped"] += 1
                 logger.warning(f"⚠️ [EventBus] 事件队列已满，丢弃事件: {event.type.value}")
 
     async def request(self, event: Event, timeout: Optional[float] = None) -> Any:
@@ -427,5 +471,6 @@ class EventBus:
         return {
             **self._stats,
             "queue_size": self._event_queue.qsize(),
+            "queue_max_size": self._max_queue_size,
             "subscriber_count": sum(len(subs) for subs in self._subscribers.values()),
         }

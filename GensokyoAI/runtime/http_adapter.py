@@ -9,6 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
+import hmac
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -24,6 +27,24 @@ RUNTIME_SERVICE_APP_KEY: web.AppKey[RuntimeService] = web.AppKey(
 )
 
 DEFAULT_WS_HEARTBEAT_INTERVAL = 30.0
+DEFAULT_MAX_REQUEST_BODY_SIZE = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeHttpSecurityConfig:
+    token: str | None = None
+    allowed_origins: tuple[str, ...] = ()
+    max_request_body_size: int = DEFAULT_MAX_REQUEST_BODY_SIZE
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.token)
+
+
+RUNTIME_SECURITY_APP_KEY: web.AppKey[RuntimeHttpSecurityConfig] = web.AppKey(
+    "runtime_http_security",
+    RuntimeHttpSecurityConfig,
+)
 
 
 def json_default(value: Any) -> str:
@@ -63,9 +84,17 @@ def create_app(
     root_dir: Path | None = None,
     *,
     service: RuntimeService | None = None,
+    auth_token: str | None = None,
+    allowed_origins: list[str] | tuple[str, ...] | None = None,
+    max_request_body_size: int = DEFAULT_MAX_REQUEST_BODY_SIZE,
 ) -> web.Application:
-    app = web.Application()
+    app = web.Application(client_max_size=max_request_body_size)
     app[RUNTIME_SERVICE_APP_KEY] = service or RuntimeService(root_dir=root_dir)
+    app[RUNTIME_SECURITY_APP_KEY] = RuntimeHttpSecurityConfig(
+        token=auth_token or os.environ.get("GENSOKYOAI_RUNTIME_TOKEN"),
+        allowed_origins=tuple(allowed_origins or ()),
+        max_request_body_size=max_request_body_size,
+    )
     app.router.add_get("/health", handle_health)
     app.router.add_get("/info", handle_info)
     app.router.add_post("/rpc", handle_rpc)
@@ -80,11 +109,13 @@ async def cleanup_runtime_service(app: web.Application) -> None:
 
 
 async def handle_health(request: web.Request) -> web.Response:
+    _validate_runtime_request(request)
     result = await request.app[RUNTIME_SERVICE_APP_KEY].health()
     return json_response(result)
 
 
 async def handle_info(request: web.Request) -> web.Response:
+    _validate_runtime_request(request)
     result = await request.app[RUNTIME_SERVICE_APP_KEY].info()
     return json_response(result)
 
@@ -92,6 +123,7 @@ async def handle_info(request: web.Request) -> web.Response:
 async def handle_rpc(request: web.Request) -> web.Response:
     request_id: Any = None
     try:
+        _validate_runtime_request(request)
         payload = await request.json()
         request_id, method, params = parse_rpc_payload(payload)
         result = await request.app[RUNTIME_SERVICE_APP_KEY].handle(method, params)
@@ -102,6 +134,7 @@ async def handle_rpc(request: web.Request) -> web.Response:
 
 
 async def handle_events(request: web.Request) -> web.StreamResponse:
+    _validate_runtime_request(request)
     service = request.app[RUNTIME_SERVICE_APP_KEY]
     subscription = await service.create_event_subscription(**_event_subscription_params_from_request(request))
     subscription_id = subscription["subscription_id"]
@@ -136,6 +169,7 @@ async def handle_events(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_ws(request: web.Request) -> web.WebSocketResponse:
+    _validate_runtime_request(request)
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     service = request.app[RUNTIME_SERVICE_APP_KEY]
@@ -216,6 +250,8 @@ async def _start_streaming_rpc_task(
     stream_tasks: dict[str, asyncio.Task[None]] | None,
 ) -> str:
     stream_id = str(params.pop("stream_id", None) or uuid4())
+    if stream_tasks is not None and stream_id in stream_tasks:
+        raise ValueError(f"Runtime stream already exists: {stream_id}")
     task = asyncio.create_task(
         _send_streaming_rpc_frames(ws, service, request_id, stream_id, params, send_lock)
     )
@@ -236,7 +272,8 @@ async def _cancel_streaming_rpc_task(
     if task is None:
         raise ValueError(f"Runtime stream does not exist: {stream_id}")
     task.cancel()
-    return {"stream_id": stream_id, "cancel_requested": True}
+    await _await_cancelled_task(task)
+    return {"stream_id": stream_id, "cancel_requested": True, "cancelled": task.cancelled()}
 
 
 async def _send_streaming_rpc_frames(
@@ -441,6 +478,38 @@ async def _send_ws_json(
 ) -> None:
     async with send_lock:
         await ws.send_str(_json_dumps(payload))
+
+
+def _validate_runtime_request(request: web.Request) -> None:
+    security = request.app[RUNTIME_SECURITY_APP_KEY]
+    _validate_origin(request, security)
+    _validate_auth_token(request, security)
+
+
+def _validate_origin(request: web.Request, security: RuntimeHttpSecurityConfig) -> None:
+    if not security.allowed_origins:
+        return
+    origin = request.headers.get("Origin")
+    if origin and origin not in security.allowed_origins:
+        raise web.HTTPForbidden(reason="Runtime request origin is not allowed")
+
+
+def _validate_auth_token(request: web.Request, security: RuntimeHttpSecurityConfig) -> None:
+    if not security.auth_enabled:
+        return
+    expected = security.token or ""
+    candidates = []
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        candidates.append(auth_header[len("Bearer "):].strip())
+    header_token = request.headers.get("X-Runtime-Token")
+    if header_token:
+        candidates.append(header_token.strip())
+    query_token = request.query.get("token")
+    if query_token:
+        candidates.append(query_token.strip())
+    if not any(hmac.compare_digest(candidate, expected) for candidate in candidates):
+        raise web.HTTPUnauthorized(reason="Runtime authentication token is required")
 
 
 def _event_subscription_params_from_request(request: web.Request) -> dict[str, Any]:

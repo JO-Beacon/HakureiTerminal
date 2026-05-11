@@ -151,28 +151,41 @@ class ActionExecutor:
     # ==================== 流式响应支持 ====================
 
     def prepare_response(self) -> asyncio.Future:
-        """准备接收响应"""
+        """准备接收响应。"""
         self._response_future = asyncio.Future()
         self._stream_queue = asyncio.Queue()
         return self._response_future
 
     async def feed_chunk(self, chunk: str) -> None:
-        """喂入流式块"""
+        """喂入流式块。"""
         if self._stream_queue:
             await self._stream_queue.put(chunk)
 
     async def get_chunk(self) -> str:
-        """获取下一个流式块"""
+        """获取下一个流式块。"""
         if self._stream_queue:
             return await self._stream_queue.get()
         return ""
 
     def complete_response(self, full_response: str = "") -> None:
-        """响应完成"""
+        """响应完成。"""
         if self._response_future and not self._response_future.done():
             self._response_future.set_result(full_response)
         self._cleanup_response()
 
+    def cancel_response(self, reason: str = "cancelled") -> None:
+        """取消当前响应并清理队列，避免半截流继续污染下一轮请求。"""
+        if self._response_future and not self._response_future.done():
+            self._response_future.cancel(reason)
+        self._cleanup_response()
+
     def _cleanup_response(self) -> None:
+        if self._stream_queue:
+            while not self._stream_queue.empty():
+                try:
+                    self._stream_queue.get_nowait()
+                    self._stream_queue.task_done()
+                except (asyncio.QueueEmpty, ValueError):
+                    break
         self._response_future = None
         self._stream_queue = None

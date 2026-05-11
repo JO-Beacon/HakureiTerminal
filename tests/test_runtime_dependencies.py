@@ -6,11 +6,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+
+import yaml
 from unittest.mock import patch
 
 from GensokyoAI.core.agent.types import ModelInfo, ProviderCapability, StreamChunk
 from GensokyoAI.core.events import Event, EventBus, SystemEvent
-from GensokyoAI.core.config import ModelConfig
+from GensokyoAI.core.config import ConfigLoader, ModelConfig
 from GensokyoAI.session.context import SessionContext
 from GensokyoAI.session.persistence import SessionPersistence
 from GensokyoAI.runtime.dependencies import (
@@ -672,6 +674,57 @@ class RuntimeEventSubscriptionTests(unittest.TestCase):
         self.assertEqual(payload["data"]["dropped_event_type"], "tool.call.started")
         self.assertNotIn("api_key", payload["data"])
         self.assertEqual(event_bus.stats["subscriber_count"], 0)
+
+
+class ConfigValidationAndRuntimePathTests(unittest.TestCase):
+    def test_config_loader_rejects_unknown_fields_and_invalid_ranges(self):
+        with self.assertRaisesRegex(ValueError, "Unknown config fields in model"):
+            ConfigLoader()._dict_to_config({"model": {"unknown": True}})
+        with self.assertRaisesRegex(ValueError, "model.temperature"):
+            ConfigLoader()._dict_to_config({"model": {"temperature": 9}})
+        with self.assertRaisesRegex(ValueError, "tool.web_search.max_results"):
+            ConfigLoader()._dict_to_config({"tool": {"web_search": {"max_results": 0}}})
+
+    def test_runtime_resolve_optional_rejects_paths_outside_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = RuntimeService(root_dir=root)
+            inside = service._resolve_optional("config/default.yaml")
+            self.assertIsNotNone(inside)
+            assert inside is not None
+            self.assertTrue(inside.is_relative_to(root.resolve()))
+            with self.assertRaisesRegex(ValueError, "outside Runtime root"):
+                service._resolve_optional(str(root.parent / "secret.yaml"))
+
+    def test_config_loader_load_reports_friendly_validation_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.yaml"
+            path.write_text(yaml.safe_dump({"model": {"timeout": 0}}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "model.timeout"):
+                ConfigLoader().load(path)
+
+
+class EventBusP0Tests(unittest.TestCase):
+    def test_event_bus_backpressure_stats_and_critical_flush(self):
+        delivered = []
+
+        async def handler(event):
+            delivered.append(event.type)
+
+        async def run():
+            bus = EventBus(enable_trace=False, max_queue_size=1)
+            bus.subscribe(SystemEvent.PERSISTENCE_SAVE_COMPLETED, handler)
+            bus.publish(Event(type=SystemEvent.PERSISTENCE_SAVE_COMPLETED, source="test"))
+            bus.publish(Event(type=SystemEvent.MODEL_COMPLETED, source="test"))
+            await bus.flush_critical(timeout=0.1)
+            return bus.stats
+
+        stats = asyncio.run(run())
+
+        self.assertEqual(delivered, [SystemEvent.PERSISTENCE_SAVE_COMPLETED])
+        self.assertEqual(stats["dropped"], 1)
+        self.assertEqual(stats["critical_flushed"], 1)
+        self.assertEqual(stats["queue_max_size"], 1)
 
 
 class RuntimeOverrideTests(unittest.TestCase):

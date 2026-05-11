@@ -85,6 +85,10 @@ class Agent:
     def _init_infrastructure(self) -> None:
         self._request_semaphore = asyncio.Semaphore(1)
         self._working_memory: Optional[WorkingMemoryManager] = None
+        self._generate_response_subscription_id: str | None = None
+        self._stream_first_chunk_timeout = 30.0
+        self._stream_idle_timeout = 30.0
+        self._stream_total_timeout = 120.0
 
     def _init_core_components(self) -> None:
         self.character_name = safe_get(self.config, "character.name", "default")
@@ -240,43 +244,83 @@ class Agent:
     async def send(
         self, user_input: str, system_contexts: list[str] | None = None
     ) -> UnifiedMessage | None:
-        """发送消息（非流式）- 完全事件驱动"""
+        """发送消息（非流式）- 完全事件驱动。"""
         if self.is_shutting_down:
             return None
 
-        # 准备接收响应
-        response_future = self._action_executor.prepare_response()  # type: ignore
+        async with self._request_semaphore:
+            if self.is_shutting_down:
+                return None
+            response_future = self._action_executor.prepare_response()  # type: ignore
+            self._publish_message_received(user_input, system_contexts)
 
-        # 发布消息接收事件
-        self.event_bus.publish(
-            Event(
-                type=SystemEvent.MESSAGE_RECEIVED,
-                source="agent",
-                data={"content": user_input, "system_contexts": system_contexts},
-            )
-        )
+            try:
+                full_response = await asyncio.wait_for(response_future, timeout=60.0)
+                if full_response:
+                    return UnifiedMessage(role="assistant", content=full_response)
+            except asyncio.TimeoutError:
+                logger.warning("等待响应超时")
+                self._action_executor.cancel_response("send timeout")  # type: ignore
+                return UnifiedMessage(role="assistant", content="「唔…我有点走神了…」")
 
-        try:
-            full_response = await asyncio.wait_for(response_future, timeout=60.0)
-            if full_response:
-                return UnifiedMessage(role="assistant", content=full_response)
-        except asyncio.TimeoutError:
-            logger.warning("等待响应超时")
-            return UnifiedMessage(role="assistant", content="「唔…我有点走神了…」")
-
-        return None
+            return None
 
     async def send_stream(
         self, user_input: str, system_contexts: list[str] | None = None
     ) -> AsyncIterator[StreamChunk]:
-        """发送消息（流式）- 完全事件驱动"""
+        """发送消息（流式）- 完全事件驱动。"""
         if self.is_shutting_down:
             return
 
-        # 准备接收响应
-        response_future = self._action_executor.prepare_response()  # type: ignore
+        async with self._request_semaphore:
+            if self.is_shutting_down:
+                return
+            response_future = self._action_executor.prepare_response()  # type: ignore
+            self._publish_message_received(user_input, system_contexts)
 
-        # 发布消息接收事件
+            full_response = ""
+            loop = asyncio.get_running_loop()
+            started_at = loop.time()
+            last_chunk_at = started_at
+            saw_chunk = False
+            try:
+                while True:
+                    timeout = self._next_stream_wait_timeout(
+                        started_at=started_at,
+                        last_chunk_at=last_chunk_at,
+                        saw_chunk=saw_chunk,
+                    )
+                    if timeout <= 0:
+                        raise TimeoutError("stream response timeout")
+                    try:
+                        chunk = await asyncio.wait_for(
+                            self._action_executor.get_chunk(),  # type: ignore
+                            timeout=min(0.1, timeout),
+                        )
+                        if chunk:
+                            saw_chunk = True
+                            last_chunk_at = loop.time()
+                            full_response += chunk
+                            yield StreamChunk(content=chunk)
+                    except asyncio.TimeoutError:
+                        if response_future.done():
+                            break
+                        if self._stream_timed_out(started_at, last_chunk_at, saw_chunk):
+                            raise TimeoutError("stream response timeout")
+                        continue
+            except (asyncio.CancelledError, GeneratorExit):
+                self._action_executor.cancel_response("stream cancelled")  # type: ignore
+                raise
+            except TimeoutError as error:
+                logger.warning(f"流式响应超时: {error}")
+                self._action_executor.cancel_response(str(error))  # type: ignore
+                yield StreamChunk(type="error", content="\n[响应超时]\n", error=str(error), error_code="agent.stream.timeout")
+            finally:
+                self._action_executor.complete_response(full_response)  # type: ignore
+
+    def _publish_message_received(
+        self, user_input: str, system_contexts: list[str] | None = None
+    ) -> None:
         self.event_bus.publish(
             Event(
                 type=SystemEvent.MESSAGE_RECEIVED,
@@ -285,21 +329,29 @@ class Agent:
             )
         )
 
-        # 流式返回
-        full_response = ""
-        try:
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(self._action_executor.get_chunk(), timeout=0.1)  # type: ignore
-                    if chunk:
-                        full_response += chunk
-                        yield StreamChunk(content=chunk)
-                except asyncio.TimeoutError:
-                    if response_future.done():
-                        break
-                    continue
-        finally:
-            self._action_executor.complete_response(full_response)  # type: ignore
+    def _next_stream_wait_timeout(
+        self,
+        *,
+        started_at: float,
+        last_chunk_at: float,
+        saw_chunk: bool,
+    ) -> float:
+        now = asyncio.get_running_loop().time()
+        total_remaining = self._stream_total_timeout - (now - started_at)
+        activity_deadline = (
+            self._stream_idle_timeout if saw_chunk else self._stream_first_chunk_timeout
+        )
+        activity_remaining = activity_deadline - (now - last_chunk_at)
+        return min(total_remaining, activity_remaining)
+
+    def _stream_timed_out(self, started_at: float, last_chunk_at: float, saw_chunk: bool) -> bool:
+        now = asyncio.get_running_loop().time()
+        if now - started_at >= self._stream_total_timeout:
+            return True
+        activity_deadline = (
+            self._stream_idle_timeout if saw_chunk else self._stream_first_chunk_timeout
+        )
+        return now - last_chunk_at >= activity_deadline
 
     # ==================== 会话管理 ====================
 
@@ -369,11 +421,11 @@ class Agent:
             self._action_executor = ActionExecutor(self, self.event_bus)
             self._lazy_components.action_executor = self._action_executor
 
-        # 订阅 GENERATE_RESPONSE 事件
-        self.event_bus.subscribe(
-            SystemEvent.GENERATE_RESPONSE,
-            self._on_generate_response,
-        )
+        if self._generate_response_subscription_id is None:
+            self._generate_response_subscription_id = self.event_bus.subscribe(
+                SystemEvent.GENERATE_RESPONSE,
+                self._on_generate_response,
+            )
 
         logger.info("Agent 已启动")
 
@@ -456,6 +508,9 @@ class Agent:
                 )
 
     async def _on_shutdown(self) -> None:
+        if self._generate_response_subscription_id is not None:
+            self.event_bus.unsubscribe(self._generate_response_subscription_id)
+            self._generate_response_subscription_id = None
         self.event_bus.publish(Event(type=SystemEvent.AGENT_SHUTDOWN, source="agent"))
 
         # 关机后普通自动保存不再提交后台任务；最终保存由 save_immediately 直接落盘。
