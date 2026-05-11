@@ -421,8 +421,7 @@ MIT License - 详见 [LICENSE](LICENSE) 文件。
 
 - [Ollama](https://ollama.ai/) - 本地模型运行
 - [OpenAI](https://openai.com/) - OpenAI API 及兼容生态
-- [Anthropic](https://www.anthropic.com/) - Claude 系列模型
-- [Google](https://ai.google.dev/) - Gemini 系列模型
+- [UV](https://github.com/astral-sh/uv) - UV包管理器
 - [Rich](https://github.com/Textualize/rich) - 终端美化
 - [msgspec](https://github.com/jcrist/msgspec) - 高性能序列化
 - [ayafileio](https://github.com/Patchouli-CN/ayafileio) - 高性能异步文件 I/O
