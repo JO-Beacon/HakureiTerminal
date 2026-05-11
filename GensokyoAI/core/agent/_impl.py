@@ -108,6 +108,7 @@ class Agent:
         self.tool_registry = self.runtime_context.tool_registry
         self.tool_executor = self.runtime_context.tool_executor
         self.tool_build_service = self.runtime_context.tool_build_service
+        self.external_tool_manager = self.runtime_context.external_tool_manager
         self.model_registry_service = self.runtime_context.model_registry_service
 
     def _init_session_system(self) -> None:
@@ -435,12 +436,20 @@ class Agent:
         capabilities = set(model_info.capabilities)
         if not capabilities:
             capabilities = {ProviderCapability.CHAT, ProviderCapability.STREAM}
+        external_tool_manager = getattr(self, "external_tool_manager", None)
+        external_tools = []
+        external_tool_policy = None
+        if external_tool_manager is not None:
+            external_tools = await external_tool_manager.list_tools(refresh=True)
+            external_tool_policy = external_tool_manager.policy
         result = self.tool_build_service.build(
             ToolBuildContext(
                 tool_config=self.config.tool,
                 model_config=self.config.model,
                 model_capabilities=capabilities,
                 character_name=self.character_name,
+                external_tools=external_tools,
+                **({"external_tool_policy": external_tool_policy} if external_tool_policy is not None else {}),
             )
         )
         self._publish_tool_selected_event(result)

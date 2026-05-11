@@ -11,6 +11,7 @@ from ...memory.episodic import EpisodicMemoryManager
 from ...session.manager import SessionManager
 from ...tools.build_service import ToolBuildService
 from ...tools.executor import ToolExecutor
+from ...tools.external_manager import ExternalToolManager
 from ...tools.registry import ToolRegistry
 from .model_client import ModelClient
 from .model_registry import ModelRegistryService
@@ -36,6 +37,7 @@ class AgentRuntimeContext:
     tool_registry: ToolRegistry
     tool_executor: ToolExecutor
     tool_build_service: ToolBuildService
+    external_tool_manager: ExternalToolManager
     model_registry_service: ModelRegistryService
     session_manager: SessionManager
 

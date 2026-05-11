@@ -13,7 +13,7 @@ from GensokyoAI.core.agent.types import ProviderCapability
 from GensokyoAI.core.config import ModelConfig, ToolConfig
 
 from .base import ToolDefinition
-from .external_manager import ExternalToolDefinition
+from .external_manager import ExternalToolDefinition, ExternalToolExecutionPolicy
 from .registry import ToolRegistry
 
 
@@ -32,6 +32,7 @@ class ToolBuildContext:
     character_name: str = ""
     system_contexts: list[str] = field(default_factory=list)
     external_tools: list[ExternalToolDefinition] = field(default_factory=list)
+    external_tool_policy: ExternalToolExecutionPolicy = field(default_factory=ExternalToolExecutionPolicy)
 
 
 @dataclass(frozen=True)
@@ -66,9 +67,11 @@ class ToolBuildService:
 
         model_supports_tools = self._model_supports_tools(context)
         selected_tools, disabled_reasons = self._select_tools(context)
-        external_tools = sorted(context.external_tools, key=lambda item: item.namespaced_name)
+        external_tools, external_disabled_reasons = self._select_external_tools(context)
+        disabled_reasons.update(external_disabled_reasons)
         instructions = self._build_instructions(
             selected_tools,
+            external_tools,
             context,
             include_schema_hint=model_supports_tools,
         )
@@ -126,6 +129,24 @@ class ToolBuildService:
         selected.sort(key=lambda item: item.name)
         return selected, disabled_reasons
 
+    def _select_external_tools(
+        self,
+        context: ToolBuildContext,
+    ) -> tuple[list[ExternalToolDefinition], dict[str, str]]:
+        selected: list[ExternalToolDefinition] = []
+        disabled_reasons: dict[str, str] = {}
+
+        for tool_def in sorted(context.external_tools, key=lambda item: item.namespaced_name):
+            if not self._runtime_tool_available(context, tool_def.namespaced_name):
+                disabled_reasons[tool_def.namespaced_name] = "runtime_unavailable"
+                continue
+            if not tool_def.permission_allowed(context.external_tool_policy):
+                disabled_reasons[tool_def.namespaced_name] = "external_permission_requires_confirmation"
+                continue
+            selected.append(tool_def)
+
+        return selected, disabled_reasons
+
     @staticmethod
     def _runtime_tool_available(context: ToolBuildContext, tool_name: str) -> bool:
         if context.runtime_available_tools is None:
@@ -157,16 +178,17 @@ class ToolBuildService:
     def _build_instructions(
         self,
         tools: list[ToolDefinition],
+        external_tools: list[ExternalToolDefinition],
         context: ToolBuildContext,
         *,
         include_schema_hint: bool,
     ) -> str:
         parts: list[str] = []
-        external_tools = sorted(context.external_tools, key=lambda item: item.namespaced_name)
         if tools or external_tools:
             builtin_desc = [f"- {tool.name}: {tool.description}" for tool in tools]
             external_desc = [
                 f"- {tool.namespaced_name}: {tool.description}"
+                f"（权限: {', '.join(sorted(tool.permissions))}）"
                 for tool in external_tools
             ]
             tools_desc = "\n".join([*builtin_desc, *external_desc])

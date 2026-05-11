@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Optional, Any
 from ..core.agent.types import UnifiedMessage
 
 from .errors import ToolError, ToolExecutionError
+from .external_manager import ExternalToolManager, is_external_tool_name
 from .registry import ToolRegistry
 from ..runtime.event_contract import sanitize_event_payload
 from ..utils.logger import logger
@@ -21,14 +22,22 @@ class ToolExecutor:
     """工具执行器"""
 
     def __init__(
-        self, registry: ToolRegistry | None = None, event_bus: Optional["EventBus"] = None
+        self,
+        registry: ToolRegistry | None = None,
+        event_bus: Optional["EventBus"] = None,
+        external_tool_manager: ExternalToolManager | None = None,
     ):
         self._registry = registry or ToolRegistry()
         self._event_bus = event_bus
+        self._external_tool_manager = external_tool_manager
 
     def set_event_bus(self, event_bus: "EventBus") -> None:
         """注入事件总线"""
         self._event_bus = event_bus
+
+    def set_external_tool_manager(self, manager: ExternalToolManager | None) -> None:
+        """注入外部工具管理器。"""
+        self._external_tool_manager = manager
 
     def parse_tool_calls(self, message: UnifiedMessage) -> list[dict[str, Any]]:
         """从 UnifiedMessage 对象解析工具调用"""
@@ -65,6 +74,9 @@ class ToolExecutor:
 
         self._publish_tool_event("started", name, arguments)
 
+        if is_external_tool_name(name):
+            return await self._execute_external(tool_call, name, arguments)
+
         tool_def = self._registry.get(name)
         if not tool_def:
             error = ToolError(
@@ -87,8 +99,7 @@ class ToolExecutor:
             else:
                 result = await asyncio.to_thread(tool_def.func, **arguments)
 
-            if not isinstance(result, str):
-                result = json.dumps(result, ensure_ascii=False)
+            result = self._serialize_tool_result(result)
 
             logger.info(f"工具 {name} 执行成功: {result[:100]}...")
             self._publish_tool_event("completed", name, arguments, result=result)
@@ -116,6 +127,60 @@ class ToolExecutor:
             logger.error(f"工具 {name} 执行错误: {e}")
             self._publish_tool_event("failed", name, arguments, error.technical_message, tool_error=error)
             return self._error_result(tool_call, name, error, legacy_prefix="错误")
+
+    async def _execute_external(
+        self,
+        tool_call: dict[str, Any],
+        name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._external_tool_manager is None:
+            error = ToolError(
+                error_code="external_tool.manager_unavailable",
+                technical_message="External tool manager is not configured for ToolExecutor.",
+                user_message="外部工具管理器不可用。",
+                recoverable=True,
+                action_hint="请确认 Runtime 或 Agent 已注入 ExternalToolManager。",
+                details={"name": name},
+            )
+            logger.warning(error.technical_message)
+            self._publish_tool_event("failed", name, arguments, error.technical_message, tool_error=error)
+            return self._error_result(tool_call, name, error, legacy_prefix="调用出错啦")
+
+        try:
+            result = await self._external_tool_manager.call_tool(name, arguments)
+            result_content = self._serialize_tool_result(result)
+            logger.info(f"外部工具 {name} 执行成功: {result_content[:100]}...")
+            self._publish_tool_event("completed", name, arguments, result=result_content)
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id", ""),
+                "name": name,
+                "content": result_content,
+            }
+        except ToolExecutionError as e:
+            error = e.error
+            logger.error(f"外部工具 {name} 执行错误: {error.technical_message}")
+            self._publish_tool_event("failed", name, arguments, error.technical_message, tool_error=error)
+            return self._error_result(tool_call, name, error, legacy_prefix="错误")
+        except Exception as e:
+            error = ToolError(
+                error_code="external_tool.execution_failed",
+                technical_message=f"外部工具执行失败: {e}",
+                user_message="外部工具执行失败。",
+                recoverable=True,
+                action_hint="请检查外部工具源状态后重试。",
+                details={"name": name, "exception_type": type(e).__name__},
+            )
+            logger.error(f"外部工具 {name} 执行错误: {e}")
+            self._publish_tool_event("failed", name, arguments, error.technical_message, tool_error=error)
+            return self._error_result(tool_call, name, error, legacy_prefix="错误")
+
+    @staticmethod
+    def _serialize_tool_result(result: Any) -> str:
+        if isinstance(result, str):
+            return result
+        return json.dumps(result, ensure_ascii=False, default=str)
 
     @staticmethod
     def _error_result(
@@ -162,6 +227,7 @@ class ToolExecutor:
         data: dict[str, Any] = {
             "name": name,
             "arguments": sanitize_event_payload(arguments),
+            "external": is_external_tool_name(name),
         }
         if error:
             data["error"] = error
@@ -196,7 +262,7 @@ class ToolExecutor:
         details: dict[str, Any] | None = None,
     ) -> None:
         """发布工具调用进度事件，供长耗时工具或外部工具适配器复用。"""
-        payload = {"status": status}
+        payload: dict[str, Any] = {"status": status}
         if message:
             payload["message"] = message
         if details:
@@ -226,6 +292,21 @@ class ToolExecutor:
             logger.error(error.technical_message)
             return self._error_result(tool_call, str(name) if name else "unknown", error, legacy_prefix="错误")
 
+        if is_external_tool_name(name):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self.execute(tool_call))
+            error = ToolError(
+                error_code="external_tool.sync_not_supported",
+                technical_message="External tools require async execution when an event loop is already running.",
+                user_message="外部工具不支持当前同步调用方式。",
+                recoverable=True,
+                action_hint="请改用异步 execute() 调用外部工具。",
+                details={"name": name},
+            )
+            return self._error_result(tool_call, name, error, legacy_prefix="错误")
+
         tool_def = self._registry.get(name)
         if not tool_def:
             error = ToolError(
@@ -240,13 +321,12 @@ class ToolExecutor:
 
         try:
             result = tool_def.func(**arguments)
-            if not isinstance(result, str):
-                result = json.dumps(result, ensure_ascii=False)
+            result_content = self._serialize_tool_result(result)
             return {
                 "role": "tool",
                 "tool_call_id": tool_call.get("id", ""),
                 "name": name,
-                "content": result,
+                "content": result_content,
             }
         except ToolExecutionError as e:
             return self._error_result(tool_call, name, e.error, legacy_prefix="错误")

@@ -8,6 +8,7 @@ from ...memory.episodic import EpisodicMemoryManager
 from ...session.manager import SessionManager
 from ...tools.build_service import ToolBuildService
 from ...tools.executor import ToolExecutor
+from ...tools.external_manager import ExternalToolManager
 from ...tools.registry import ToolRegistry
 from .model_client import ModelClient
 from .model_registry import ModelRegistryService
@@ -37,7 +38,12 @@ class AgentComposition:
             model_client,
         )
         tool_registry = ToolRegistry()
-        tool_executor = ToolExecutor(tool_registry, event_bus=event_bus)
+        external_tool_manager = ExternalToolManager()
+        tool_executor = ToolExecutor(
+            tool_registry,
+            event_bus=event_bus,
+            external_tool_manager=external_tool_manager,
+        )
         tool_build_service = ToolBuildService(tool_registry)
         model_registry_service = ModelRegistryService()
         session_manager = SessionManager(
@@ -54,6 +60,7 @@ class AgentComposition:
             tool_registry=tool_registry,
             tool_executor=tool_executor,
             tool_build_service=tool_build_service,
+            external_tool_manager=external_tool_manager,
             model_registry_service=model_registry_service,
             session_manager=session_manager,
         )
