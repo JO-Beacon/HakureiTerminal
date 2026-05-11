@@ -42,13 +42,16 @@ GensokyoAI 提供前端无关的 Runtime 边界：
 - `agent.init`
 - `agent.send_message`
 - `character.list`
+- `model.list`
+- `model.info`
 - `session.create`
 - `session.list`
 - `session.resume`
 - `dependency.status`
 - `dependency.install`
+- `external_tool.status`
 
-旧方法名仍保留兼容，例如 `init`、`send_message`、`list_characters`、`dependency_status`、`install_dependencies`。
+旧方法名仍保留兼容：`init`、`send_message`、`list_characters`、`create_session`、`list_sessions`、`resume_session`、`shutdown`、`dependency_status`、`install_dependencies`、`external_tool_status`。
 
 ## 可选 Provider 依赖
 
@@ -57,6 +60,8 @@ Provider SDK 保持可选安装：
 - `ollama = ["ollama"]`
 - `openai = ["openai>=1.0.0"]`
 - `openrouter = ["openai>=1.0.0"]`
+- `deepseek = ["openai>=1.0.0"]`
+- `openai_responses = ["openai>=1.0.0"]`
 - `claude = ["anthropic>=0.20.0"]`
 - `gemini = ["google-genai>=1.0.0"]`
 - `all = [...]`
@@ -89,7 +94,7 @@ GensokyoAI 不是简单的问答机器人，而是围绕“角色扮演”设计
 
 ### 更好的会话管理
 
-支持创建、保存、恢复、列出和回滚会话。说错话可以撤回，历史会话可以继续，不同角色也可以分别维护自己的交流记录。
+支持创建、保存、恢复和列出会话；Agent 与内置 CLI 支持回滚上一轮对话，Runtime RPC 当前暴露创建、列出和恢复会话，暂未暴露回滚方法。说错话可以撤回，历史会话可以继续，不同角色也可以分别维护自己的交流记录。
 
 ### 可选择不同模型服务
 
