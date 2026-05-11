@@ -247,14 +247,13 @@ class SessionPersistence:
 
     def delete_session(self, session_id: str) -> bool:
         """删除会话（同步）- 优化版"""
-        self._remove_from_index(session_id)
-
-        # 使用索引快速定位
+        # 使用索引快速定位；删除成功后再移除索引，避免提前移除导致快速路径失效。
         char_id = self._session_index.get(session_id)
         if char_id:
             session_file = self.base_path / char_id / f"{session_id}.json"
             if session_file.exists():
                 session_file.unlink()
+                self._remove_from_index(session_id)
                 logger.debug(f"会话已删除: {session_id}")
                 return True
 
@@ -264,6 +263,7 @@ class SessionPersistence:
                 session_file = char_dir / f"{session_id}.json"
                 if session_file.exists():
                     session_file.unlink()
+                    self._remove_from_index(session_id)
                     logger.debug(f"会话已删除: {session_id}")
                     return True
         return False
@@ -271,14 +271,13 @@ class SessionPersistence:
     async def delete_session_async(self, session_id: str) -> bool:
         """删除会话（异步）- 优化版"""
         async with self._lock:
-            self._remove_from_index(session_id)
-
-            # 使用索引快速定位
+            # 使用索引快速定位；删除成功后再移除索引，避免提前移除导致快速路径失效。
             char_id = self._session_index.get(session_id)
             if char_id:
                 session_file = self.base_path / char_id / f"{session_id}.json"
                 if session_file.exists():
                     await asyncio.to_thread(session_file.unlink)
+                    self._remove_from_index(session_id)
                     logger.debug(f"会话已异步删除: {session_id}")
                     return True
 
@@ -288,6 +287,7 @@ class SessionPersistence:
                     session_file = char_dir / f"{session_id}.json"
                     if session_file.exists():
                         await asyncio.to_thread(session_file.unlink)
+                        self._remove_from_index(session_id)
                         logger.debug(f"会话已异步删除: {session_id}")
                         return True
         return False

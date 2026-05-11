@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from .events import Event, SystemEvent, EventBus
-from ..memory.types import TopicMemory, TopicMemoryType
 from ..utils.logger import logger
 
 if TYPE_CHECKING:
@@ -289,23 +288,9 @@ class MemoryServiceListeners:
         try:
             if hasattr(self.agent, "semantic_memory"):
                 store = self.agent.semantic_memory.store
-                topic_name_lower = topic_name.lower()
+                topic = await store.update_topic_memory(topic_name, new_content)
 
-                if topic_name_lower in store._topic_name_index:
-                    topic_id = store._topic_name_index[topic_name_lower]
-                    topic = store._topics[topic_id]
-
-                    memory = TopicMemory(
-                        content=new_content,
-                        importance=0.7,
-                        memory_type=TopicMemoryType.CORRECTION,
-                        supersedes=topic.message_ids[-1] if topic.message_ids else None,
-                    )
-                    store._memories[memory.id] = memory
-
-                    store._update_topic(topic, memory, 0.7, 10.0)
-                    await store._save_async()
-
+                if topic:
                     logger.info(f"记忆服务: 已更新话题「{topic_name}」，原因: {reason}")
                     self.event_bus.respond(event, {"topic_name": topic.name, "updated": True})
                     return

@@ -33,7 +33,7 @@ from GensokyoAI.core.agent.types import (
     WebSearchReference,
 )
 from GensokyoAI.core.events import SystemEvent
-from GensokyoAI.core.config import ConfigLoader, EmbeddingConfig, ModelConfig
+from GensokyoAI.core.config import ConfigLoader, EmbeddingConfig, ModelConfig, ToolConfig
 
 
 class _EmbeddingsProvider(BaseProvider):
@@ -399,6 +399,112 @@ class P1ApiCallFeatureTests(unittest.TestCase):
         self.assertEqual(config.model.max_tokens, 2048)
         self.assertEqual(config.model.timeout, 60)
         self.assertEqual(config.model.retry_max_attempts, 3)
+
+    def test_config_loader_merge_non_model_sections_respects_explicit_default_values(self):
+        loader = ConfigLoader()
+        base = loader._dict_to_config(
+            {
+                "debug_silent_output": True,
+                "event_trace_enabled": True,
+                "embedding": {
+                    "provider": "openai",
+                    "name": "embed-large",
+                    "dimensions": 1024,
+                    "use_proxy": True,
+                },
+                "memory": {
+                    "working_max_turns": 99,
+                    "semantic_enabled": False,
+                    "auto_memory_enabled": False,
+                    "topic_generation": {"name_max_length": 20, "summary_max_length": 200},
+                },
+                "tool": {
+                    "enabled": False,
+                    "builtin_tools": ["time"],
+                    "web_search": {
+                        "enabled": True,
+                        "provider": "api",
+                        "max_results": 20,
+                        "trigger_strategy": "auto",
+                        "api": {"method": "GET", "results_path": "items"},
+                    },
+                },
+                "session": {"auto_save": False, "max_sessions": 200},
+                "think_engine": {
+                    "enabled": False,
+                    "think_interval_minutes": 10,
+                    "think_max_tokens": 400,
+                },
+            }
+        )
+        override = loader._dict_to_config(
+            {
+                "debug_silent_output": False,
+                "event_trace_enabled": False,
+                "embedding": {
+                    "provider": None,
+                    "name": None,
+                    "dimensions": None,
+                    "use_proxy": None,
+                },
+                "memory": {
+                    "working_max_turns": 20,
+                    "semantic_enabled": True,
+                    "auto_memory_enabled": True,
+                    "topic_generation": {"name_max_length": 10, "summary_max_length": 100},
+                },
+                "tool": {
+                    "enabled": True,
+                    "builtin_tools": ["time", "moon", "memory", "system"],
+                    "web_search": {
+                        "enabled": False,
+                        "provider": "bing",
+                        "max_results": 10,
+                        "trigger_strategy": "explicit",
+                        "api": {"method": "POST", "results_path": "results"},
+                    },
+                },
+                "session": {"auto_save": True, "max_sessions": 100},
+                "think_engine": {
+                    "enabled": True,
+                    "think_interval_minutes": 5,
+                    "think_max_tokens": 200,
+                },
+            }
+        )
+
+        merged = loader._merge(base, override)
+
+        self.assertFalse(merged.debug_silent_output)
+        self.assertFalse(merged.event_trace_enabled)
+        self.assertIsNone(merged.embedding.provider)
+        self.assertIsNone(merged.embedding.name)
+        self.assertIsNone(merged.embedding.dimensions)
+        self.assertIsNone(merged.embedding.use_proxy)
+        self.assertEqual(merged.memory.working_max_turns, 20)
+        self.assertTrue(merged.memory.semantic_enabled)
+        self.assertTrue(merged.memory.auto_memory_enabled)
+        self.assertEqual(merged.memory.topic_generation.name_max_length, 10)
+        self.assertEqual(merged.memory.topic_generation.summary_max_length, 100)
+        self.assertTrue(merged.tool.enabled)
+        self.assertEqual(merged.tool.builtin_tools, ["time", "moon", "memory", "system"])
+        self.assertFalse(merged.tool.web_search.enabled)
+        self.assertEqual(merged.tool.web_search.provider, "bing")
+        self.assertEqual(merged.tool.web_search.max_results, 10)
+        self.assertEqual(merged.tool.web_search.trigger_strategy, "explicit")
+        self.assertEqual(merged.tool.web_search.api.method, "POST")
+        self.assertEqual(merged.tool.web_search.api.results_path, "results")
+        self.assertTrue(merged.session.auto_save)
+        self.assertEqual(merged.session.max_sessions, 100)
+        self.assertTrue(merged.think_engine.enabled)
+        self.assertEqual(merged.think_engine.think_interval_minutes, 5)
+        self.assertEqual(merged.think_engine.think_max_tokens, 200)
+
+    def test_tool_config_default_includes_event_trace_default(self):
+        config = ConfigLoader()._dict_to_config({"tool": {}})
+
+        self.assertIsInstance(config.tool, ToolConfig)
+        self.assertFalse(config.event_trace_enabled)
 
     def test_model_client_supports_embeddings_uses_capability(self):
         client = ModelClient.__new__(ModelClient)

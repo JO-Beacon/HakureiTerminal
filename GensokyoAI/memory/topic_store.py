@@ -24,7 +24,7 @@ from typing import Optional
 import msgspec
 import ayafileio
 
-from .types import Topic, TopicMemory
+from .types import Topic, TopicMemory, TopicMemoryType
 from ..utils.logger import logger
 from ..core.config import TopicGenerationConfig
 from ..core.agent.model_client import ModelClient
@@ -462,6 +462,41 @@ class TopicAwareStore:
     def get_all_topics(self) -> list[Topic]:
         """获取所有话题（只读）"""
         return list(self._topics.values())
+
+    def find_topic_by_name(self, name: str) -> Optional[Topic]:
+        """根据话题名查找话题。"""
+        topic_id = self._topic_name_index.get(name.lower())
+        if not topic_id:
+            return None
+        return self._topics.get(topic_id)
+
+    async def update_topic_memory(
+        self,
+        topic_name: str,
+        content: str,
+        *,
+        importance: float = 0.7,
+        score: float = 10.0,
+        memory_type: TopicMemoryType = TopicMemoryType.CORRECTION,
+    ) -> Optional[Topic]:
+        """为指定话题追加一条更新记忆，并返回更新后的话题。"""
+        if not topic_name or not content:
+            return None
+
+        topic = self.find_topic_by_name(topic_name)
+        if topic is None:
+            return None
+
+        memory = TopicMemory(
+            content=content,
+            importance=importance,
+            memory_type=memory_type,
+            supersedes=topic.message_ids[-1] if topic.message_ids else None,
+        )
+        self._memories[memory.id] = memory
+        self._update_topic(topic, memory, importance, score)
+        await self._save_async()
+        return topic
 
     def get_topic_by_id(self, topic_id: str) -> Optional[Topic]:
         """根据 ID 获取话题"""

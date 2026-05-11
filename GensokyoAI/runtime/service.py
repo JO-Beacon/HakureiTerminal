@@ -345,7 +345,17 @@ class RuntimeService:
             "provider",
             "name",
             "base_url",
+            "api_path",
             "api_key",
+            "extra_headers",
+            "model_capabilities_add",
+            "model_capabilities_remove",
+            "web_search_enabled",
+            "web_search_strategy",
+            "web_search_context_size",
+            "web_search_user_location",
+            "web_search_allow_fallback",
+            "web_search_metadata",
             "stream",
             "think",
             "thinking_enabled",
@@ -355,6 +365,10 @@ class RuntimeService:
             "max_tokens",
             "timeout",
             "use_proxy",
+            "retry_max_attempts",
+            "retry_initial_delay",
+            "retry_backoff_factor",
+            "retry_status_codes",
         }
         RuntimeService._apply_overrides(model, overrides, allowed)
 

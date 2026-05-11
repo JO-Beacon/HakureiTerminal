@@ -87,7 +87,7 @@ class Agent:
         self.system_prompt = self._build_system_prompt()
 
     def _init_infrastructure(self) -> None:
-        self.event_bus = EventBus(enable_trace=True)
+        self.event_bus = EventBus(enable_trace=self.config.event_trace_enabled)
         self._request_semaphore = asyncio.Semaphore(1)
         self._working_memory: Optional[WorkingMemoryManager] = None
 
@@ -330,10 +330,10 @@ class Agent:
 
     def rollback(self, num: int = 1, mode: Literal["turns", "messages"] = "turns") -> None:
         wm = self.working_memory
-        roll_num = num * 2 if mode == "turns" else num
-        for _ in range(roll_num):
-            if wm._memory.messages:
-                wm._memory.messages.pop()
+        if mode == "turns":
+            wm.rollback_turns(num)
+        else:
+            wm.rollback_messages(num)
 
     # ==================== 生命周期 ====================
 

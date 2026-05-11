@@ -223,6 +223,9 @@ class AppConfig(Struct):
     # 调试配置：开启后才输出静默思考、内心决策、推理内容等默认隐藏信息
     debug_silent_output: bool = False
 
+    # 事件追踪日志：开启后 EventBus 会输出每个事件的详细投递日志
+    event_trace_enabled: bool = False
+
     # 子配置
     model: ModelConfig = field(default_factory=ModelConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
@@ -291,6 +294,7 @@ class ConfigLoader:
     def _dict_to_config(self, data: dict[str, Any]) -> AppConfig:
         """字典转配置对象，并记录用户显式提供的字段。"""
         config = AppConfig()
+        self._provided_fields[id(config)] = set(data.keys())
 
         if "log_level" in data:
             config.log_level = LogLevel(data["log_level"])
@@ -300,37 +304,73 @@ class ConfigLoader:
             config.log_file = Path(data["log_file"])
         if "debug_silent_output" in data:
             config.debug_silent_output = bool(data["debug_silent_output"])
+        if "event_trace_enabled" in data:
+            config.event_trace_enabled = bool(data["event_trace_enabled"])
 
         if "model" in data:
             model_data = data["model"] or {}
             config.model = ModelConfig(**model_data)
             self._provided_fields[id(config.model)] = set(model_data.keys())
         if "embedding" in data:
-            config.embedding = EmbeddingConfig(**data["embedding"])
+            embedding_data = data["embedding"] or {}
+            config.embedding = EmbeddingConfig(**embedding_data)
+            self._provided_fields[id(config.embedding)] = set(embedding_data.keys())
         if "memory" in data:
-            config.memory = MemoryConfig(**data["memory"])
+            memory_data = data["memory"] or {}
+            topic_generation_data = memory_data.get("topic_generation")
+            memory_obj_data = dict(memory_data)
+            memory_obj_data.pop("topic_generation", None)
+            config.memory = MemoryConfig(**memory_obj_data)
+            if isinstance(topic_generation_data, dict):
+                config.memory.topic_generation = TopicGenerationConfig(**topic_generation_data)
+            self._provided_fields[id(config.memory)] = set(memory_data.keys())
+            if isinstance(topic_generation_data, dict):
+                self._provided_fields[id(config.memory.topic_generation)] = set(topic_generation_data.keys())
         if "tool" in data:
             tool_data = data["tool"] or {}
             config.tool = self._dict_to_tool_config(tool_data)
+            self._provided_fields[id(config.tool)] = set(tool_data.keys())
+            if isinstance(tool_data.get("web_search"), dict):
+                self._provided_fields[id(config.tool.web_search)] = set(tool_data["web_search"].keys())
+                if isinstance(tool_data["web_search"].get("api"), dict):
+                    self._provided_fields[id(config.tool.web_search.api)] = set(tool_data["web_search"]["api"].keys())
         if "session" in data:
-            config.session = SessionConfig(**data["session"])
+            session_data = data["session"] or {}
+            config.session = SessionConfig(**session_data)
+            self._provided_fields[id(config.session)] = set(session_data.keys())
 
         if "think_engine" in data:
-            config.think_engine = ThinkEngineConfig(**data["think_engine"])
+            think_engine_data = data["think_engine"] or {}
+            config.think_engine = ThinkEngineConfig(**think_engine_data)
+            self._provided_fields[id(config.think_engine)] = set(think_engine_data.keys())
 
         return config
 
     def _merge(self, base: AppConfig, override: AppConfig) -> AppConfig:
         """合并配置 - override 优先"""
         result = AppConfig()
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
 
         # 日志配置 - override 优先
-        result.log_level = (
-            override.log_level if override.log_level != LogLevel.INFO else base.log_level
+        result.log_level = choose(
+            "log_level",
+            override.log_level if override.log_level != LogLevel.INFO else base.log_level,
         )
-        result.log_console = override.log_console
-        result.log_file = override.log_file or base.log_file
-        result.debug_silent_output = override.debug_silent_output or base.debug_silent_output
+        result.log_console = choose("log_console", override.log_console)
+        result.log_file = choose("log_file", override.log_file or base.log_file)
+        result.debug_silent_output = choose(
+            "debug_silent_output",
+            override.debug_silent_output or base.debug_silent_output,
+        )
+        result.event_trace_enabled = choose(
+            "event_trace_enabled",
+            override.event_trace_enabled or base.event_trace_enabled,
+        )
 
         # 其他配置 - override 优先
         result.model = self._merge_model(base.model, override.model)
@@ -434,44 +474,100 @@ class ConfigLoader:
         )
 
     def _merge_embedding(self, base: EmbeddingConfig, override: EmbeddingConfig) -> EmbeddingConfig:
-        """合并 Embedding 配置 - override 优先"""
+        """合并 Embedding 配置 - override 优先。"""
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
         return EmbeddingConfig(
-            provider=override.provider or base.provider,
-            name=override.name or base.name,
-            base_url=override.base_url or base.base_url,
-            api_key=override.api_key or base.api_key,
-            dimensions=override.dimensions or base.dimensions,
-            encoding_format=override.encoding_format or base.encoding_format,
-            timeout=override.timeout or base.timeout,
-            use_proxy=override.use_proxy if override.use_proxy is not None else base.use_proxy,
+            provider=choose("provider", override.provider or base.provider),
+            name=choose("name", override.name or base.name),
+            base_url=choose("base_url", override.base_url or base.base_url),
+            api_key=choose("api_key", override.api_key or base.api_key),
+            dimensions=choose("dimensions", override.dimensions or base.dimensions),
+            encoding_format=choose("encoding_format", override.encoding_format or base.encoding_format),
+            timeout=choose("timeout", override.timeout or base.timeout),
+            use_proxy=choose(
+                "use_proxy",
+                override.use_proxy if override.use_proxy is not None else base.use_proxy,
+            ),
         )
 
     def _merge_memory(self, base: MemoryConfig, override: MemoryConfig) -> MemoryConfig:
-        """合并记忆配置 - override 优先"""
+        """合并记忆配置 - override 优先。"""
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
         return MemoryConfig(
-            working_max_turns=override.working_max_turns
-            if override.working_max_turns != 20
-            else base.working_max_turns,
-            episodic_threshold=override.episodic_threshold
-            if override.episodic_threshold != 50
-            else base.episodic_threshold,
-            episodic_summary_model=override.episodic_summary_model
-            if override.episodic_summary_model != "qwen3.5:9b"
-            else base.episodic_summary_model,
-            episodic_keep_recent=override.episodic_keep_recent
-            if override.episodic_keep_recent != 10
-            else base.episodic_keep_recent,
-            semantic_enabled=override.semantic_enabled,
-            semantic_top_k=override.semantic_top_k
-            if override.semantic_top_k != 5
-            else base.semantic_top_k,
-            semantic_similarity_threshold=override.semantic_similarity_threshold
-            if override.semantic_similarity_threshold != 0.7
-            else base.semantic_similarity_threshold,
-            auto_memory_enabled=override.auto_memory_enabled,
-            auto_memory_model=override.auto_memory_model
-            if override.auto_memory_model != "qwen3.5:9b"
-            else base.auto_memory_model,
+            working_max_turns=choose(
+                "working_max_turns",
+                override.working_max_turns if override.working_max_turns != 20 else base.working_max_turns,
+            ),
+            episodic_threshold=choose(
+                "episodic_threshold",
+                override.episodic_threshold if override.episodic_threshold != 50 else base.episodic_threshold,
+            ),
+            episodic_summary_model=choose(
+                "episodic_summary_model",
+                override.episodic_summary_model
+                if override.episodic_summary_model != "qwen3.5:9b"
+                else base.episodic_summary_model,
+            ),
+            episodic_keep_recent=choose(
+                "episodic_keep_recent",
+                override.episodic_keep_recent if override.episodic_keep_recent != 10 else base.episodic_keep_recent,
+            ),
+            semantic_enabled=choose("semantic_enabled", override.semantic_enabled),
+            semantic_top_k=choose(
+                "semantic_top_k",
+                override.semantic_top_k if override.semantic_top_k != 5 else base.semantic_top_k,
+            ),
+            semantic_similarity_threshold=choose(
+                "semantic_similarity_threshold",
+                override.semantic_similarity_threshold
+                if override.semantic_similarity_threshold != 0.7
+                else base.semantic_similarity_threshold,
+            ),
+            auto_memory_enabled=choose("auto_memory_enabled", override.auto_memory_enabled),
+            auto_memory_model=choose(
+                "auto_memory_model",
+                override.auto_memory_model if override.auto_memory_model != "qwen3.5:9b" else base.auto_memory_model,
+            ),
+            topic_generation=self._merge_topic_generation(
+                base.topic_generation,
+                override.topic_generation,
+            ),
+        )
+
+    def _merge_topic_generation(
+        self,
+        base: TopicGenerationConfig,
+        override: TopicGenerationConfig,
+    ) -> TopicGenerationConfig:
+        """合并话题生成配置。"""
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
+        return TopicGenerationConfig(
+            name_max_length=choose(
+                "name_max_length",
+                override.name_max_length if override.name_max_length != 10 else base.name_max_length,
+            ),
+            summary_max_length=choose(
+                "summary_max_length",
+                override.summary_max_length if override.summary_max_length != 100 else base.summary_max_length,
+            ),
         )
 
     def _dict_to_tool_config(self, data: dict[str, Any]) -> ToolConfig:
@@ -479,6 +575,7 @@ class ConfigLoader:
         tool_data = dict(data)
         web_search_data = tool_data.pop("web_search", None)
         if isinstance(web_search_data, dict):
+            web_search_data = dict(web_search_data)
             api_data = web_search_data.pop("api", None)
             web_search_config = WebSearchToolConfig(**web_search_data)
             if isinstance(api_data, dict):
@@ -492,22 +589,48 @@ class ConfigLoader:
         override: WebSearchAPIConfig,
     ) -> WebSearchAPIConfig:
         """合并 Web search API Provider 配置。"""
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
         return WebSearchAPIConfig(
-            endpoint=override.endpoint or base.endpoint,
-            method=override.method if override.method != "POST" else base.method,
-            api_key=override.api_key or base.api_key,
-            api_key_header=override.api_key_header
-            if override.api_key_header != "Authorization"
-            else base.api_key_header,
-            api_key_prefix=override.api_key_prefix if override.api_key_prefix != "Bearer " else base.api_key_prefix,
-            headers=override.headers or base.headers,
-            request_template=override.request_template or base.request_template,
-            query_params=override.query_params or base.query_params,
-            results_path=override.results_path if override.results_path != "results" else base.results_path,
-            title_path=override.title_path if override.title_path != "title" else base.title_path,
-            url_path=override.url_path if override.url_path != "url" else base.url_path,
-            snippet_path=override.snippet_path if override.snippet_path != "content" else base.snippet_path,
-            published_at_path=override.published_at_path or base.published_at_path,
+            endpoint=choose("endpoint", override.endpoint or base.endpoint),
+            method=choose("method", override.method if override.method != "POST" else base.method),
+            api_key=choose("api_key", override.api_key or base.api_key),
+            api_key_header=choose(
+                "api_key_header",
+                override.api_key_header if override.api_key_header != "Authorization" else base.api_key_header,
+            ),
+            api_key_prefix=choose(
+                "api_key_prefix",
+                override.api_key_prefix if override.api_key_prefix != "Bearer " else base.api_key_prefix,
+            ),
+            headers=choose("headers", override.headers or base.headers),
+            request_template=choose("request_template", override.request_template or base.request_template),
+            query_params=choose("query_params", override.query_params or base.query_params),
+            results_path=choose(
+                "results_path",
+                override.results_path if override.results_path != "results" else base.results_path,
+            ),
+            title_path=choose(
+                "title_path",
+                override.title_path if override.title_path != "title" else base.title_path,
+            ),
+            url_path=choose(
+                "url_path",
+                override.url_path if override.url_path != "url" else base.url_path,
+            ),
+            snippet_path=choose(
+                "snippet_path",
+                override.snippet_path if override.snippet_path != "content" else base.snippet_path,
+            ),
+            published_at_path=choose(
+                "published_at_path",
+                override.published_at_path or base.published_at_path,
+            ),
         )
 
     def _merge_web_search_tool(
@@ -516,86 +639,144 @@ class ConfigLoader:
         override: WebSearchToolConfig,
     ) -> WebSearchToolConfig:
         """合并自有 Web search 工具配置。"""
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
+        default_user_agent = WebSearchToolConfig().user_agent
         return WebSearchToolConfig(
-            enabled=override.enabled if override.enabled != base.enabled else base.enabled,
-            provider=override.provider if override.provider != "bing" else base.provider,
-            max_results=override.max_results if override.max_results != 10 else base.max_results,
-            timeout=override.timeout if override.timeout != 10 else base.timeout,
-            cache_ttl_seconds=override.cache_ttl_seconds
-            if override.cache_ttl_seconds != 300
-            else base.cache_ttl_seconds,
-            user_agent=override.user_agent if override.user_agent != WebSearchToolConfig().user_agent else base.user_agent,
-            trigger_strategy=override.trigger_strategy
-            if override.trigger_strategy != "explicit"
-            else base.trigger_strategy,
-            freshness_keywords=override.freshness_keywords or base.freshness_keywords,
-            prefer_for_characters=override.prefer_for_characters or base.prefer_for_characters,
-            prefer_for_scenarios=override.prefer_for_scenarios or base.prefer_for_scenarios,
-            region=override.region or base.region,
-            safe_search=override.safe_search if override.safe_search != "moderate" else base.safe_search,
-            snippet_max_length=override.snippet_max_length
-            if override.snippet_max_length != 200
-            else base.snippet_max_length,
+            enabled=choose("enabled", override.enabled if override.enabled != base.enabled else base.enabled),
+            provider=choose("provider", override.provider if override.provider != "bing" else base.provider),
+            max_results=choose("max_results", override.max_results if override.max_results != 10 else base.max_results),
+            timeout=choose("timeout", override.timeout if override.timeout != 10 else base.timeout),
+            cache_ttl_seconds=choose(
+                "cache_ttl_seconds",
+                override.cache_ttl_seconds if override.cache_ttl_seconds != 300 else base.cache_ttl_seconds,
+            ),
+            user_agent=choose(
+                "user_agent",
+                override.user_agent if override.user_agent != default_user_agent else base.user_agent,
+            ),
+            trigger_strategy=choose(
+                "trigger_strategy",
+                override.trigger_strategy if override.trigger_strategy != "explicit" else base.trigger_strategy,
+            ),
+            freshness_keywords=choose("freshness_keywords", override.freshness_keywords or base.freshness_keywords),
+            prefer_for_characters=choose(
+                "prefer_for_characters",
+                override.prefer_for_characters or base.prefer_for_characters,
+            ),
+            prefer_for_scenarios=choose(
+                "prefer_for_scenarios",
+                override.prefer_for_scenarios or base.prefer_for_scenarios,
+            ),
+            region=choose("region", override.region or base.region),
+            safe_search=choose(
+                "safe_search",
+                override.safe_search if override.safe_search != "moderate" else base.safe_search,
+            ),
+            snippet_max_length=choose(
+                "snippet_max_length",
+                override.snippet_max_length if override.snippet_max_length != 200 else base.snippet_max_length,
+            ),
             api=self._merge_web_search_api(base.api, override.api),
         )
 
     def _merge_tool(self, base: ToolConfig, override: ToolConfig) -> ToolConfig:
-        """合并工具配置 - 修复覆盖逻辑"""
+        """合并工具配置。"""
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
         return ToolConfig(
-            enabled=override.enabled if override.enabled != base.enabled else base.enabled,
-            builtin_tools=override.builtin_tools
-            if override.builtin_tools != base.builtin_tools
-            else base.builtin_tools,
-            custom_tools_path=override.custom_tools_path or base.custom_tools_path,
+            enabled=choose("enabled", override.enabled if override.enabled != base.enabled else base.enabled),
+            builtin_tools=choose(
+                "builtin_tools",
+                override.builtin_tools if override.builtin_tools != base.builtin_tools else base.builtin_tools,
+            ),
+            custom_tools_path=choose("custom_tools_path", override.custom_tools_path or base.custom_tools_path),
             web_search=self._merge_web_search_tool(base.web_search, override.web_search),
         )
 
     def _merge_session(self, base: SessionConfig, override: SessionConfig) -> SessionConfig:
-        """合并会话配置 - 修复覆盖逻辑"""
+        """合并会话配置。"""
+        provided = self._provided_fields.get(id(override))
         default_path = Path("./sessions")
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
         return SessionConfig(
-            auto_save=override.auto_save
-            if override.auto_save != base.auto_save
-            else base.auto_save,
-            save_path=override.save_path if override.save_path != default_path else base.save_path,
-            max_sessions=override.max_sessions
-            if override.max_sessions != 100
-            else base.max_sessions,
+            auto_save=choose("auto_save", override.auto_save if override.auto_save != base.auto_save else base.auto_save),
+            save_path=choose("save_path", override.save_path if override.save_path != default_path else base.save_path),
+            max_sessions=choose("max_sessions", override.max_sessions if override.max_sessions != 100 else base.max_sessions),
         )
 
     def _merge_think_engine(
         self, base: ThinkEngineConfig, override: ThinkEngineConfig
     ) -> ThinkEngineConfig:
-        """合并思考引擎配置"""
+        """合并思考引擎配置。"""
+        provided = self._provided_fields.get(id(override))
+
+        def choose(field_name: str, legacy_value: Any) -> Any:
+            if provided is not None:
+                return getattr(override, field_name) if field_name in provided else getattr(base, field_name)
+            return legacy_value
+
         return ThinkEngineConfig(
-            enabled=override.enabled if override.enabled != base.enabled else base.enabled,
-            think_interval_minutes=override.think_interval_minutes
-            if override.think_interval_minutes != 5
-            else base.think_interval_minutes,
-            random_walk_steps_min=override.random_walk_steps_min
-            if override.random_walk_steps_min != 2
-            else base.random_walk_steps_min,
-            random_walk_steps_max=override.random_walk_steps_max
-            if override.random_walk_steps_max != 5
-            else base.random_walk_steps_max,
-            emotional_trigger_threshold=override.emotional_trigger_threshold
-            if override.emotional_trigger_threshold != 0.5
-            else base.emotional_trigger_threshold,
-            emotional_priority_probability=override.emotional_priority_probability
-            if override.emotional_priority_probability != 0.7
-            else base.emotional_priority_probability,
-            think_temperature=override.think_temperature
-            if override.think_temperature != 0.7
-            else base.think_temperature,
-            think_max_tokens=override.think_max_tokens
-            if override.think_max_tokens != 200
-            else base.think_max_tokens,
-            initiative_temperature=override.initiative_temperature
-            if override.initiative_temperature != 0.8
-            else base.initiative_temperature,
-            initiative_max_tokens=override.initiative_max_tokens
-            if override.initiative_max_tokens != 100
-            else base.initiative_max_tokens,
+            enabled=choose("enabled", override.enabled if override.enabled != base.enabled else base.enabled),
+            think_interval_minutes=choose(
+                "think_interval_minutes",
+                override.think_interval_minutes if override.think_interval_minutes != 5 else base.think_interval_minutes,
+            ),
+            random_walk_steps_min=choose(
+                "random_walk_steps_min",
+                override.random_walk_steps_min if override.random_walk_steps_min != 2 else base.random_walk_steps_min,
+            ),
+            random_walk_steps_max=choose(
+                "random_walk_steps_max",
+                override.random_walk_steps_max if override.random_walk_steps_max != 5 else base.random_walk_steps_max,
+            ),
+            emotional_trigger_threshold=choose(
+                "emotional_trigger_threshold",
+                override.emotional_trigger_threshold
+                if override.emotional_trigger_threshold != 0.5
+                else base.emotional_trigger_threshold,
+            ),
+            emotional_priority_probability=choose(
+                "emotional_priority_probability",
+                override.emotional_priority_probability
+                if override.emotional_priority_probability != 0.7
+                else base.emotional_priority_probability,
+            ),
+            think_temperature=choose(
+                "think_temperature",
+                override.think_temperature if override.think_temperature != 0.7 else base.think_temperature,
+            ),
+            think_max_tokens=choose(
+                "think_max_tokens",
+                override.think_max_tokens if override.think_max_tokens != 200 else base.think_max_tokens,
+            ),
+            initiative_temperature=choose(
+                "initiative_temperature",
+                override.initiative_temperature
+                if override.initiative_temperature != 0.8
+                else base.initiative_temperature,
+            ),
+            initiative_max_tokens=choose(
+                "initiative_max_tokens",
+                override.initiative_max_tokens
+                if override.initiative_max_tokens != 100
+                else base.initiative_max_tokens,
+            ),
         )
 
     def _apply_env(self, config: AppConfig) -> AppConfig:
@@ -658,18 +839,16 @@ class ConfigLoader:
             config.embedding.encoding_format = os.getenv("GENSOKYOAI_EMBEDDING_ENCODING_FORMAT")  # type: ignore
         if os.getenv("GENSOKYOAI_EMBEDDING_TIMEOUT"):
             config.embedding.timeout = int(os.getenv("GENSOKYOAI_EMBEDDING_TIMEOUT"))  # type: ignore
-        if os.getenv("GENSOKYOAI_EMBEDDING_USE_PROXY"):
-            config.embedding.use_proxy = (
-                os.getenv("GENSOKYOAI_EMBEDDING_USE_PROXY").lower() == "true"
-            )  # type: ignore
+        if embedding_use_proxy := os.getenv("GENSOKYOAI_EMBEDDING_USE_PROXY"):
+            config.embedding.use_proxy = embedding_use_proxy.lower() == "true"
         if os.getenv("GENSOKYOAI_LOG_LEVEL"):
             config.log_level = LogLevel(os.getenv("GENSOKYOAI_LOG_LEVEL"))
         if os.getenv("GENSOKYOAI_LOG_CONSOLE"):
             config.log_console = os.getenv("GENSOKYOAI_LOG_CONSOLE").lower() == "true"  # type: ignore
-        if os.getenv("GENSOKYOAI_DEBUG_SILENT_OUTPUT"):
-            config.debug_silent_output = (
-                os.getenv("GENSOKYOAI_DEBUG_SILENT_OUTPUT").lower() == "true"
-            )  # type: ignore
+        if debug_silent_output := os.getenv("GENSOKYOAI_DEBUG_SILENT_OUTPUT"):
+            config.debug_silent_output = debug_silent_output.lower() == "true"
+        if event_trace_enabled := os.getenv("GENSOKYOAI_EVENT_TRACE_ENABLED"):
+            config.event_trace_enabled = event_trace_enabled.lower() == "true"
         if os.getenv("GENSOKYOAI_MEMORY_WORKING_TURNS"):
             config.memory.working_max_turns = int(
                 os.getenv("GENSOKYOAI_MEMORY_WORKING_TURNS")  # type: ignore

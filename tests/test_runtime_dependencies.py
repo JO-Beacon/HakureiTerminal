@@ -1,10 +1,14 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from GensokyoAI.core.agent.types import ModelInfo, ProviderCapability
 from GensokyoAI.core.config import ModelConfig
+from GensokyoAI.session.context import SessionContext
+from GensokyoAI.session.persistence import SessionPersistence
 from GensokyoAI.runtime.dependencies import (
     OPTIONAL_PROVIDER_DEPENDENCIES,
     DependencyError,
@@ -99,6 +103,39 @@ class FakeModelRegistry:
             owned_by="tests",
             metadata={"selected": True},
         )
+
+
+class SessionPersistenceIndexTests(unittest.TestCase):
+    def test_delete_session_uses_index_before_removing_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            persistence = SessionPersistence(Path(tmp))
+            session = SessionContext(character_id="reimu")
+            persistence.save_session(session)
+            session_file = Path(tmp) / "reimu" / f"{session.session_id}.json"
+            self.assertTrue(session_file.exists())
+            self.assertEqual(persistence._session_index[session.session_id], "reimu")
+
+            deleted = persistence.delete_session(session.session_id)
+
+            self.assertTrue(deleted)
+            self.assertFalse(session_file.exists())
+            self.assertNotIn(session.session_id, persistence._session_index)
+
+    def test_delete_session_async_uses_index_before_removing_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            persistence = SessionPersistence(Path(tmp))
+            session = SessionContext(character_id="marisa")
+            persistence.save_session(session)
+            session_file = Path(tmp) / "marisa" / f"{session.session_id}.json"
+
+            async def run():
+                return await persistence.delete_session_async(session.session_id)
+
+            deleted = asyncio.run(run())
+
+            self.assertTrue(deleted)
+            self.assertFalse(session_file.exists())
+            self.assertNotIn(session.session_id, persistence._session_index)
 
 
 class RuntimeModelRpcTests(unittest.TestCase):
@@ -218,6 +255,36 @@ class RuntimeRpcDispatchTests(unittest.TestCase):
         self.assertEqual(response["error_object"]["user_message"], "tool user failure")
         self.assertFalse(response["error_object"]["recoverable"])
         self.assertEqual(response["error_object"]["details"], {"scope": "runtime"})
+
+
+class RuntimeOverrideTests(unittest.TestCase):
+    def test_model_overrides_allow_runtime_api_related_fields(self):
+        config = ModelConfig(provider="openai", name="old")
+
+        RuntimeService._apply_model_overrides(
+            config,
+            {
+                "api_path": "/custom/chat/completions",
+                "extra_headers": {"X-Test": "1"},
+                "web_search_enabled": True,
+                "web_search_strategy": "explicit",
+                "retry_max_attempts": 5,
+                "retry_initial_delay": 0.5,
+                "retry_backoff_factor": 1.5,
+                "retry_status_codes": [500, 502, 429],
+                "not_allowed": "ignored",
+            },
+        )
+
+        self.assertEqual(config.api_path, "/custom/chat/completions")
+        self.assertEqual(config.extra_headers, {"X-Test": "1"})
+        self.assertTrue(config.web_search_enabled)
+        self.assertEqual(config.web_search_strategy, "explicit")
+        self.assertEqual(config.retry_max_attempts, 5)
+        self.assertEqual(config.retry_initial_delay, 0.5)
+        self.assertEqual(config.retry_backoff_factor, 1.5)
+        self.assertEqual(config.retry_status_codes, [500, 502, 429])
+        self.assertFalse(hasattr(config, "not_allowed"))
 
 
 if __name__ == "__main__":

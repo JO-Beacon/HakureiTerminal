@@ -63,6 +63,20 @@ class WorkingMemoryManager:
         
         return cleaned
 
+    def rollback_messages(self, count: int) -> int:
+        """回滚最近 count 条消息，返回实际移除数量。"""
+        if count <= 0:
+            return 0
+
+        removed = min(count, len(self._memory.messages))
+        if removed:
+            del self._memory.messages[-removed:]
+        return removed
+
+    def rollback_turns(self, count: int) -> int:
+        """按对话轮回滚消息，每轮默认包含 user/assistant 两条消息。"""
+        return self.rollback_messages(count * 2)
+
     def get_context(self) -> list[dict[str, Any]]:
         """获取当前上下文"""
         return self._memory.get_context()
