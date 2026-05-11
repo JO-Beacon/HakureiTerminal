@@ -39,12 +39,13 @@ class ProviderRegistryTests(unittest.TestCase):
             self.assertIsInstance(definition.default_headers, dict)
             self.assertIsInstance(definition.capabilities, frozenset)
             self.assertTrue(definition.capabilities)
+            self.assertFalse(ProviderCapability.unknown(definition.capabilities))
             self.assertIsNotNone(definition.dependency_key)
             self.assertIsNotNone(definition.model_registry_id)
 
     def test_builtin_definitions_capture_provider_defaults_and_capabilities(self):
         openrouter = ProviderFactory.get_provider_definition("openrouter")
-        self.assertIsNotNone(openrouter)
+        assert openrouter is not None
         self.assertIs(openrouter.provider_class, OpenRouterProvider)
         self.assertEqual(openrouter.default_base_url, OpenRouterProvider.DEFAULT_BASE_URL)
         self.assertEqual(openrouter.default_api_path, "/chat/completions")
@@ -54,13 +55,47 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertIn(ProviderCapability.TOOLS, openrouter.capabilities)
 
         deepseek = ProviderFactory.get_provider_definition("deepseek")
-        self.assertIsNotNone(deepseek)
+        assert deepseek is not None
         self.assertIs(deepseek.provider_class, DeepSeekProvider)
         self.assertEqual(deepseek.default_base_url, DeepSeekProvider.DEFAULT_BASE_URL)
         self.assertEqual(deepseek.default_api_path, "/chat/completions")
         self.assertEqual(deepseek.dependency_key, "openai")
         self.assertEqual(deepseek.model_registry_id, "deepseek")
         self.assertIn(ProviderCapability.REASONING, deepseek.capabilities)
+
+    def test_provider_capability_aliases_are_normalized_for_contract_metadata(self):
+        definition = ProviderDefinition(
+            id="alias_contract",
+            name="Alias Contract",
+            protocol="test",
+            provider_class=DummyRegistryProvider,
+            capabilities=frozenset({"tool_calling", "embedding", "json-schema", "websearch"}),
+            builtin=False,
+        )
+
+        self.assertEqual(
+            definition.capabilities,
+            frozenset(
+                {
+                    ProviderCapability.TOOLS,
+                    ProviderCapability.EMBEDDINGS,
+                    ProviderCapability.STRUCTURED_OUTPUT,
+                    ProviderCapability.WEB_SEARCH,
+                }
+            ),
+        )
+
+    def test_base_provider_supports_uses_normalized_capability_aliases(self):
+        provider = DummyRegistryProvider(
+            ModelConfig(
+                provider="dummy",
+                name="dummy-model",
+                model_capabilities_add=["tool-calling"],
+            )
+        )
+
+        self.assertTrue(provider.supports(ProviderCapability.TOOLS))
+        self.assertTrue(provider.supports("tool_calls"))
 
     def test_available_providers_remains_list_of_registered_provider_ids(self):
         available = ProviderFactory.available_providers()
@@ -89,7 +124,7 @@ class ProviderRegistryTests(unittest.TestCase):
             ProviderFactory.register(provider_id, DummyRegistryProvider)
 
         definition = ProviderFactory.get_provider_definition(provider_id)
-        self.assertIsNotNone(definition)
+        assert definition is not None
         self.assertEqual(definition.id, provider_id)
         self.assertEqual(definition.name, provider_id)
         self.assertEqual(definition.protocol, "custom")

@@ -44,23 +44,24 @@ class ClaudeProvider(BaseProvider):
     @property
     def capabilities(self) -> set[str]:
         """Claude Provider 能力声明。"""
-        return {
-            ProviderCapability.CHAT,
-            ProviderCapability.STREAM,
-            ProviderCapability.TOOLS,
-            ProviderCapability.VISION,
-            ProviderCapability.REASONING,
-        }
+        return self.apply_model_capability_overrides(
+            {
+                ProviderCapability.CHAT,
+                ProviderCapability.STREAM,
+                ProviderCapability.TOOLS,
+                ProviderCapability.VISION,
+                ProviderCapability.REASONING,
+            }
+        )
 
     def _build_client(self):
         """构建 Anthropic 异步客户端"""
-        try:
-            from anthropic import AsyncAnthropic
-        except ImportError:
-            raise ImportError(
-                "使用 Claude Provider 需要安装 anthropic 包: pip install anthropic\n"
-                "或者: pip install gensokyoai[claude]"
-            )
+        anthropic_module = self.import_optional_dependency(
+            "anthropic",
+            "使用 Claude Provider 需要安装 anthropic 包: pip install anthropic\n"
+            "或者: pip install gensokyoai[claude]",
+        )
+        AsyncAnthropic = anthropic_module.AsyncAnthropic
 
         kwargs = {}
         if self.config.api_key:

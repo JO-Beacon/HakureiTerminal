@@ -151,7 +151,7 @@ class ModelRegistryService:
     @staticmethod
     def _heuristic_capabilities(provider: str, model_id: str) -> set[str]:
         definition = ProviderFactory.get_provider_definition(provider)
-        capabilities = set(definition.capabilities) if definition else {
+        capabilities = ProviderCapability.normalize(definition.capabilities) if definition else {
             ProviderCapability.CHAT,
             ProviderCapability.STREAM,
         }
@@ -164,7 +164,7 @@ class ModelRegistryService:
             capabilities.add(ProviderCapability.WEB_SEARCH)
         if "embed" in normalized or "embedding" in normalized:
             capabilities.add(ProviderCapability.EMBEDDINGS)
-        return capabilities
+        return ProviderCapability.normalize(capabilities)
 
     def _provider_models(
         self,
@@ -194,9 +194,9 @@ class ModelRegistryService:
 
         for model in models:
             copied = self._copy_model(model)
-            capabilities = set(copied.capabilities)
-            capabilities.update(config.model_capabilities_add or [])
-            capabilities.difference_update(config.model_capabilities_remove or [])
+            capabilities = ProviderCapability.normalize(copied.capabilities)
+            capabilities.update(ProviderCapability.normalize(config.model_capabilities_add or []))
+            capabilities.difference_update(ProviderCapability.normalize(config.model_capabilities_remove or []))
 
             override = self._find_override(normalized_overrides, copied.id)
             if override:
@@ -206,8 +206,8 @@ class ModelRegistryService:
                     copied.context_window = override.context_window
                 if override.owned_by is not None:
                     copied.owned_by = override.owned_by
-                capabilities.update(override.capabilities_add)
-                capabilities.difference_update(override.capabilities_remove)
+                capabilities.update(ProviderCapability.normalize(override.capabilities_add))
+                capabilities.difference_update(ProviderCapability.normalize(override.capabilities_remove))
                 copied.metadata = {**dict(copied.metadata), **dict(override.metadata), "overridden": True}
 
             copied.capabilities = sorted(capabilities)
@@ -218,9 +218,9 @@ class ModelRegistryService:
             key = self._normalize_model_id(override.id)
             if key in seen:
                 continue
-            capabilities = set(override.capabilities_add)
-            capabilities.update(config.model_capabilities_add or [])
-            capabilities.difference_update(config.model_capabilities_remove or [])
+            capabilities = ProviderCapability.normalize(override.capabilities_add)
+            capabilities.update(ProviderCapability.normalize(config.model_capabilities_add or []))
+            capabilities.difference_update(ProviderCapability.normalize(config.model_capabilities_remove or []))
             result.append(
                 ModelInfo(
                     id=override.id,
@@ -248,8 +248,8 @@ class ModelRegistryService:
                     id=str(value.get("id") or model_id),
                     name=value.get("name"),
                     context_window=value.get("context_window"),
-                    capabilities_add=frozenset(value.get("capabilities_add") or []),
-                    capabilities_remove=frozenset(value.get("capabilities_remove") or []),
+                    capabilities_add=frozenset(ProviderCapability.normalize(value.get("capabilities_add") or [])),
+                    capabilities_remove=frozenset(ProviderCapability.normalize(value.get("capabilities_remove") or [])),
                     owned_by=value.get("owned_by"),
                     metadata=dict(value.get("metadata") or {}),
                 )
@@ -294,7 +294,7 @@ class ModelRegistryService:
             id=model.id,
             name=model.name,
             context_window=model.context_window,
-            capabilities=list(model.capabilities),
+            capabilities=sorted(ProviderCapability.normalize(model.capabilities)),
             owned_by=model.owned_by,
             metadata=dict(model.metadata),
         )

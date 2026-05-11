@@ -67,17 +67,19 @@ class OpenAIResponsesProvider(BaseProvider):
     @property
     def capabilities(self) -> set[str]:
         """OpenAI Responses Provider 能力声明。"""
-        return {
-            ProviderCapability.CHAT,
-            ProviderCapability.STREAM,
-            ProviderCapability.TOOLS,
-            ProviderCapability.EMBEDDINGS,
-            ProviderCapability.VISION,
-            ProviderCapability.REASONING,
-            ProviderCapability.RESPONSES_API,
-            ProviderCapability.CUSTOM_ENDPOINT,
-            ProviderCapability.WEB_SEARCH,
-        }
+        return self.apply_model_capability_overrides(
+            {
+                ProviderCapability.CHAT,
+                ProviderCapability.STREAM,
+                ProviderCapability.TOOLS,
+                ProviderCapability.EMBEDDINGS,
+                ProviderCapability.VISION,
+                ProviderCapability.REASONING,
+                ProviderCapability.RESPONSES_API,
+                ProviderCapability.CUSTOM_ENDPOINT,
+                ProviderCapability.WEB_SEARCH,
+            }
+        )
 
     @property
     def endpoint(self) -> str:
@@ -100,13 +102,12 @@ class OpenAIResponsesProvider(BaseProvider):
 
     def _build_client(self):
         """构建 OpenAI 异步客户端"""
-        try:
-            from openai import AsyncOpenAI
-        except ImportError:
-            raise ImportError(
-                "使用 OpenAI Responses Provider 需要安装 openai 包: pip install openai\n"
-                "或者: pip install gensokyoai[openai]"
-            )
+        openai_module = self.import_optional_dependency(
+            "openai",
+            "使用 OpenAI Responses Provider 需要安装 openai 包: pip install openai\n"
+            "或者: pip install gensokyoai[openai]",
+        )
+        AsyncOpenAI = openai_module.AsyncOpenAI
 
         self._endpoint = normalize_openai_responses_host_and_path(
             self.config.base_url,
@@ -362,7 +363,7 @@ class OpenAIResponsesProvider(BaseProvider):
                         tool_calls=unified_tool_calls,
                     )
                     usage = self._usage_to_dict(getattr(getattr(event, "response", None), "usage", None))
-                    tool_info = {"message": unified_msg}
+                    tool_info: dict[str, Any] = {"message": unified_msg}
                     if raw_arguments:
                         tool_info["raw_arguments"] = raw_arguments
                     yield StreamChunk(
@@ -704,7 +705,7 @@ class OpenAIResponsesProvider(BaseProvider):
                             function=ToolCallFunction(name=tc_data["name"], arguments=args),
                         )
                     )
-                tool_info = {"message": UnifiedMessage(role="assistant", content="", tool_calls=unified_tool_calls)}
+                tool_info: dict[str, Any] = {"message": UnifiedMessage(role="assistant", content="", tool_calls=unified_tool_calls)}
                 if raw_arguments:
                     tool_info["raw_arguments"] = raw_arguments
                 yield StreamChunk(type="tool_call", is_tool_call=True, tool_info=tool_info, finish_reason="tool_calls", usage=usage)

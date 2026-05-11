@@ -23,7 +23,14 @@ from GensokyoAI.core.agent.model_registry import ModelRegistryService
 from GensokyoAI.core.agent.types import ModelInfo
 from GensokyoAI.core.config import ConfigLoader
 from GensokyoAI.runtime.dependencies import InstallScope, dependency_status, install_dependencies
-from GensokyoAI.runtime.rpc import dispatch_rpc, legacy_rpc_methods, rpc_methods, runtime_error_to_dict
+from GensokyoAI.runtime.rpc import (
+    dispatch_rpc,
+    legacy_rpc_methods,
+    rpc_method_specs,
+    rpc_methods,
+    runtime_error_to_dict,
+    runtime_protocol_metadata,
+)
 
 RUNTIME_EVENT_BACKPRESSURE_DROPPED = "runtime.backpressure.dropped"
 REDACTED_VALUE = "[redacted]"
@@ -95,11 +102,26 @@ class RuntimeService:
     async def info(self) -> dict[str, Any]:
         """Return runtime capability information for generic clients."""
 
+        protocol_metadata = runtime_protocol_metadata()
         return {
             "name": "GensokyoAI Runtime",
             "protocol": "json-lines-rpc",
+            **protocol_metadata,
+            "capabilities": [
+                "agent.lifecycle",
+                "agent.messaging",
+                "agent.streaming",
+                "character.discovery",
+                "dependency.management",
+                "external_tool.status",
+                "model.discovery",
+                "runtime.events",
+                "runtime.health",
+                "session.management",
+            ],
             "methods": rpc_methods(),
             "legacy_methods": legacy_rpc_methods(),
+            "method_specs": rpc_method_specs(),
             "external_tools": self.external_tool_manager.source_status(include_tools=False),
         }
 

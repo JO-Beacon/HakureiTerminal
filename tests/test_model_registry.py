@@ -103,7 +103,7 @@ class ModelRegistryServiceTests(unittest.TestCase):
         )
         model = ModelRegistryService.match_model(models, "openai/gpt-4o")
 
-        self.assertIsNotNone(model)
+        assert model is not None
         self.assertEqual(model.name, "Remote GPT-4o")
         self.assertEqual(model.context_window, 256000)
         self.assertEqual(model.owned_by, "remote-openai")
@@ -209,10 +209,48 @@ class ModelRegistryServiceTests(unittest.TestCase):
         reverse_prefix = ModelRegistryService.match_model(models, "deepseek-reasoner-v1")
         no_match = ModelRegistryService.match_model(models, "gemini2.5pro")
 
+        assert exact is not None
+        assert prefix is not None
+        assert reverse_prefix is not None
         self.assertEqual(exact.id, "models/gemini-2.5-pro")
         self.assertEqual(prefix.id, "models/gemini-2.5-pro")
         self.assertEqual(reverse_prefix.id, "deepseek-reasoner")
         self.assertIsNone(no_match)
+
+    def test_model_capability_aliases_are_normalized_across_remote_config_and_overrides(self):
+        StaticModelProvider.models = [
+            ModelInfo(
+                id="alias-model",
+                name="Alias Model",
+                capabilities=["tool-calling", "json-schema", "websearch"],
+            )
+        ]
+        service = ModelRegistryService(provider_builder=lambda config: StaticModelProvider(config))
+        config = ModelConfig(
+            provider="openai",
+            name="alias-model",
+            model_capabilities_add=["embedding"],
+            model_capabilities_remove=["tool_calls"],
+        )
+
+        info = asyncio.run(
+            service.get_model_info(
+                config,
+                overrides={
+                    "alias-model": {
+                        "capabilities_add": ["function_calling", "structured_outputs"],
+                        "capabilities_remove": ["web-search"],
+                    }
+                },
+            )
+        )
+
+        self.assertIn(ProviderCapability.EMBEDDINGS, info.capabilities)
+        self.assertIn(ProviderCapability.STRUCTURED_OUTPUT, info.capabilities)
+        self.assertIn(ProviderCapability.TOOLS, info.capabilities)
+        self.assertNotIn(ProviderCapability.WEB_SEARCH, info.capabilities)
+        self.assertNotIn("tool-calling", info.capabilities)
+        self.assertNotIn("json-schema", info.capabilities)
 
     def test_cache_avoids_provider_call_when_refresh_false(self):
         StaticModelProvider.models = [ModelInfo(id="gpt-4o", name="gpt-4o")]

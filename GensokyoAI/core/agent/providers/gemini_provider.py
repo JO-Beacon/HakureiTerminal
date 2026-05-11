@@ -6,7 +6,8 @@
 # GensokyoAI/core/agent/providers/gemini_provider.py
 
 import json
-from typing import Any, AsyncIterator, TYPE_CHECKING
+from collections.abc import AsyncIterable, Iterable
+from typing import Any, AsyncIterator, TYPE_CHECKING, cast
 
 from .base import BaseProvider
 from .openai_provider import OpenAIProvider
@@ -46,26 +47,35 @@ class GeminiProvider(BaseProvider):
     @property
     def capabilities(self) -> set[str]:
         """Gemini Provider 能力声明。"""
-        return {
-            ProviderCapability.CHAT,
-            ProviderCapability.STREAM,
-            ProviderCapability.TOOLS,
-            ProviderCapability.EMBEDDINGS,
-            ProviderCapability.VISION,
-            ProviderCapability.REASONING,
-            ProviderCapability.WEB_SEARCH,
-        }
+        return self.apply_model_capability_overrides(
+            {
+                ProviderCapability.CHAT,
+                ProviderCapability.STREAM,
+                ProviderCapability.TOOLS,
+                ProviderCapability.EMBEDDINGS,
+                ProviderCapability.VISION,
+                ProviderCapability.REASONING,
+                ProviderCapability.WEB_SEARCH,
+            }
+        )
+
+    @classmethod
+    def _load_genai_module(cls) -> Any:
+        """动态加载 Gemini SDK，避免可选依赖缺失时触发静态导入告警。"""
+        return cls.import_optional_dependency(
+            "google.genai",
+            "使用 Gemini Provider 需要安装 google-genai 包: pip install google-genai\n"
+            "或者: pip install gensokyoai[gemini]",
+        )
+
+    @classmethod
+    def _load_genai_types(cls) -> Any:
+        """动态加载 google.genai.types，统一可选依赖边界。"""
+        return cls._load_genai_module().types
 
     def _build_client(self):
         """构建 Gemini 客户端"""
-        try:
-            from google import genai
-        except ImportError:
-            raise ImportError(
-                "使用 Gemini Provider 需要安装 google-genai 包: pip install google-genai\n"
-                "或者: pip install gensokyoai[gemini]"
-            )
-
+        genai = self._load_genai_module()
         return genai.Client(api_key=self.config.api_key)
 
     async def chat(
@@ -77,7 +87,7 @@ class GeminiProvider(BaseProvider):
         **kwargs,
     ) -> UnifiedResponse:
         """非流式调用 Gemini API"""
-        from google.genai import types as genai_types
+        genai_types = self._load_genai_types()
 
         options = options or {}
         system_instruction, gemini_contents = self._convert_messages(messages)
@@ -118,7 +128,7 @@ class GeminiProvider(BaseProvider):
         **kwargs,
     ) -> AsyncIterator[StreamChunk]:
         """流式调用 Gemini API"""
-        from google.genai import types as genai_types
+        genai_types = self._load_genai_types()
 
         options = options or {}
         system_instruction, gemini_contents = self._convert_messages(messages)
@@ -201,9 +211,9 @@ class GeminiProvider(BaseProvider):
                 )
             ]
 
-        items = getattr(response, "models", response) or []
+        items: Any = getattr(response, "models", response) or []
         models: list[ModelInfo] = []
-        if hasattr(items, "__aiter__"):
+        if isinstance(items, AsyncIterable):
             async for item in items:
                 model_id = getattr(item, "name", "") or getattr(item, "id", "")
                 if model_id:
@@ -217,7 +227,7 @@ class GeminiProvider(BaseProvider):
                         )
                     )
         else:
-            for item in items:
+            for item in cast(Iterable[Any], items):
                 model_id = getattr(item, "name", "") or getattr(item, "id", "")
                 if model_id:
                     metadata = item.model_dump() if hasattr(item, "model_dump") else {}
@@ -497,7 +507,7 @@ class GeminiProvider(BaseProvider):
         Gemini 使用 function_declarations
         """
         try:
-            from google.genai import types as genai_types
+            genai_types = GeminiProvider._load_genai_types()
         except ImportError:
             return []
 

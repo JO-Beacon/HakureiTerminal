@@ -56,6 +56,8 @@ dev = [
     "pytest-cov>=5.0",
     "coverage>=7.0",
     "ruff>=0.6.0",
+    "pyright>=1.1.390",
+    "build>=1.2.0",
 ]
 dev-dependencies = []
 
@@ -69,6 +71,7 @@ source = ["GensokyoAI"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 45
 
 [tool.ruff]
 target-version = "py314"
@@ -82,3 +85,15 @@ ignore = ["E501"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
+include = ["GensokyoAI", "tests"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", ".venv", "build", "dist"]
+reportMissingImports = "warning"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownParameterType = "none"

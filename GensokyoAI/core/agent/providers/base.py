@@ -2,8 +2,9 @@
 
 # GensokyoAI/core/agent/providers/base.py
 
+import importlib
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, TYPE_CHECKING
+from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .auth_utils import TokenRefreshManager
 from ....utils.request_utils import merge_headers
@@ -40,15 +41,24 @@ class BaseProvider(ABC):
         return {ProviderCapability.CHAT, ProviderCapability.STREAM}
 
     def supports(self, capability: str) -> bool:
-        """检查 Provider 是否声明支持指定能力。"""
-        return capability in self.capabilities
+        """检查 Provider 是否声明支持指定能力，兼容常见能力别名。"""
+        normalized = ProviderCapability.normalize_name(capability)
+        return normalized in self.apply_model_capability_overrides(self.capabilities)
 
     def apply_model_capability_overrides(self, capabilities: set[str]) -> set[str]:
         """应用配置中的模型能力增删覆盖，修正远端元数据或启发式推断误差。"""
-        result = set(capabilities)
-        result.update(self.config.model_capabilities_add or [])
-        result.difference_update(self.config.model_capabilities_remove or [])
+        result = ProviderCapability.normalize(capabilities)
+        result.update(ProviderCapability.normalize(self.config.model_capabilities_add or []))
+        result.difference_update(ProviderCapability.normalize(self.config.model_capabilities_remove or []))
         return result
+
+    @staticmethod
+    def import_optional_dependency(module_name: str, install_hint: str) -> Any:
+        """动态导入可选 SDK，避免未安装 extra 时触发静态导入告警。"""
+        try:
+            return importlib.import_module(module_name)
+        except ImportError as exc:
+            raise ImportError(install_hint) from exc
 
     async def list_models(self) -> list["ModelInfo"]:
         """列出 Provider 可用模型；默认无远程模型列表。"""

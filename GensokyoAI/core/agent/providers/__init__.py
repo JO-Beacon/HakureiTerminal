@@ -34,6 +34,11 @@ class ProviderDefinition:
     builtin: bool = True
 
 
+    def __post_init__(self) -> None:
+        """标准化 Provider 控制面能力声明，避免注册表与实例能力使用不同命名。"""
+        object.__setattr__(self, "capabilities", frozenset(ProviderCapability.normalize(self.capabilities)))
+
+
 class ProviderFactory:
     """
     Provider 工厂 - 根据配置创建对应的 LLM Provider
@@ -297,6 +302,10 @@ class ProviderFactory:
             raise ValueError("ProviderDefinition.id 不能为空")
         if definition.id in cls._registry:
             raise ValueError(f"Provider ID 已注册: {definition.id}")
+        unknown = ProviderCapability.unknown(definition.capabilities)
+        if unknown:
+            unknown_text = ", ".join(sorted(unknown))
+            raise ValueError(f"ProviderDefinition 包含未知能力: {definition.id} -> {unknown_text}")
 
         cls._registry[definition.id] = definition
 

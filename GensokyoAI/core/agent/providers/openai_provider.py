@@ -107,13 +107,12 @@ class OpenAIProvider(BaseProvider):
 
     def _build_client(self):
         """构建 OpenAI 异步客户端"""
-        try:
-            from openai import AsyncOpenAI
-        except ImportError:
-            raise ImportError(
-                "使用 OpenAI Provider 需要安装 openai 包: pip install openai\n"
-                "或者: pip install gensokyoai[openai]"
-            )
+        openai_module = self.import_optional_dependency(
+            "openai",
+            "使用 OpenAI Provider 需要安装 openai 包: pip install openai\n"
+            "或者: pip install gensokyoai[openai]",
+        )
+        AsyncOpenAI = openai_module.AsyncOpenAI
 
         self._endpoint = normalize_openai_api_host_and_path(
             self.config.base_url,
@@ -184,12 +183,12 @@ class OpenAIProvider(BaseProvider):
         """
         import copy
 
-        cleaned = copy.deepcopy(messages)
+        cleaned: list[dict[str, Any]] = copy.deepcopy(messages)
         for msg in cleaned:
             if isinstance(msg, dict):
                 msg["content"] = OpenAIProvider._convert_content_parts(msg.get("content", ""))
 
-        stack = [cleaned]
+        stack: list[Any] = [cleaned]
 
         while stack:
             obj = stack.pop()
@@ -397,7 +396,7 @@ class OpenAIProvider(BaseProvider):
                     content="",
                     tool_calls=unified_tool_calls,
                 )
-                tool_info = {"message": unified_msg}
+                tool_info: dict[str, Any] = {"message": unified_msg}
                 if raw_arguments:
                     tool_info["raw_arguments"] = raw_arguments
                 yield StreamChunk(
@@ -564,7 +563,7 @@ class OpenAIProvider(BaseProvider):
                     )
                 )
             unified_msg = UnifiedMessage(role="assistant", content="", tool_calls=unified_tool_calls)
-            tool_info = {"message": unified_msg}
+            tool_info: dict[str, Any] = {"message": unified_msg}
             if raw_arguments:
                 tool_info["raw_arguments"] = raw_arguments
             yield StreamChunk(

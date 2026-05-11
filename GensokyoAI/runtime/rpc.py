@@ -35,6 +35,25 @@ class RpcMethodSpec:
     method: str
     handler_name: str
     legacy: bool = False
+    replacement: str | None = None
+    remove_after: str | None = None
+
+    @property
+    def namespace(self) -> str:
+        """Return the stable method namespace for documentation and clients."""
+
+        return self.method.split(".", 1)[0] if "." in self.method else "legacy"
+
+    @property
+    def deprecated(self) -> bool:
+        """Return whether this method is deprecated in the current protocol."""
+
+        return self.legacy or self.replacement is not None
+
+
+RUNTIME_PROTOCOL_VERSION = "1.1.0"
+RUNTIME_PROTOCOL_MAJOR_VERSION = 1
+RUNTIME_BREAKING_CHANGES: tuple[dict[str, str], ...] = ()
 
 
 RPC_METHOD_SPECS: tuple[RpcMethodSpec, ...] = (
@@ -58,22 +77,112 @@ RPC_METHOD_SPECS: tuple[RpcMethodSpec, ...] = (
     RpcMethodSpec("dependency.status", "dependency_status"),
     RpcMethodSpec("dependency.install", "install_dependencies"),
     RpcMethodSpec("external_tool.status", "external_tool_status"),
-    RpcMethodSpec("init", "init", legacy=True),
-    RpcMethodSpec("send_message", "send_message", legacy=True),
-    RpcMethodSpec("send_message_stream", "send_message_stream", legacy=True),
-    RpcMethodSpec("list_characters", "list_characters", legacy=True),
-    RpcMethodSpec("create_session", "create_session", legacy=True),
-    RpcMethodSpec("list_sessions", "list_sessions", legacy=True),
-    RpcMethodSpec("current_session", "current_session", legacy=True),
-    RpcMethodSpec("resume_session", "resume_session", legacy=True),
-    RpcMethodSpec("delete_session", "delete_session", legacy=True),
-    RpcMethodSpec("export_session", "export_session", legacy=True),
-    RpcMethodSpec("rename_session", "rename_session", legacy=True),
-    RpcMethodSpec("rollback_session", "rollback_session", legacy=True),
-    RpcMethodSpec("shutdown", "shutdown", legacy=True),
-    RpcMethodSpec("dependency_status", "dependency_status", legacy=True),
-    RpcMethodSpec("install_dependencies", "install_dependencies", legacy=True),
-    RpcMethodSpec("external_tool_status", "external_tool_status", legacy=True),
+    RpcMethodSpec("init", "init", legacy=True, replacement="agent.init", remove_after="2.0.0"),
+    RpcMethodSpec(
+        "send_message",
+        "send_message",
+        legacy=True,
+        replacement="agent.send_message",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "send_message_stream",
+        "send_message_stream",
+        legacy=True,
+        replacement="agent.send_message_stream",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "list_characters",
+        "list_characters",
+        legacy=True,
+        replacement="character.list",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "create_session",
+        "create_session",
+        legacy=True,
+        replacement="session.create",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "list_sessions",
+        "list_sessions",
+        legacy=True,
+        replacement="session.list",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "current_session",
+        "current_session",
+        legacy=True,
+        replacement="session.current",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "resume_session",
+        "resume_session",
+        legacy=True,
+        replacement="session.resume",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "delete_session",
+        "delete_session",
+        legacy=True,
+        replacement="session.delete",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "export_session",
+        "export_session",
+        legacy=True,
+        replacement="session.export",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "rename_session",
+        "rename_session",
+        legacy=True,
+        replacement="session.rename",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "rollback_session",
+        "rollback_session",
+        legacy=True,
+        replacement="session.rollback",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "shutdown",
+        "shutdown",
+        legacy=True,
+        replacement="runtime.shutdown",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "dependency_status",
+        "dependency_status",
+        legacy=True,
+        replacement="dependency.status",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "install_dependencies",
+        "install_dependencies",
+        legacy=True,
+        replacement="dependency.install",
+        remove_after="2.0.0",
+    ),
+    RpcMethodSpec(
+        "external_tool_status",
+        "external_tool_status",
+        legacy=True,
+        replacement="external_tool.status",
+        remove_after="2.0.0",
+    ),
 )
 
 
@@ -168,9 +277,30 @@ def rpc_method_specs() -> list[dict[str, Any]]:
             "method": spec.method,
             "handler": spec.handler_name,
             "legacy": spec.legacy,
+            "namespace": spec.namespace,
+            "deprecated": spec.deprecated,
+            "replacement": spec.replacement,
+            "remove_after": spec.remove_after,
         }
         for spec in RPC_METHOD_SPECS
     ]
+
+
+def deprecated_rpc_methods() -> list[dict[str, Any]]:
+    """Return deprecated public methods with migration metadata."""
+
+    return [spec for spec in rpc_method_specs() if spec["deprecated"]]
+
+
+def runtime_protocol_metadata() -> dict[str, Any]:
+    """Return versioned Runtime protocol metadata for clients and docs."""
+
+    return {
+        "protocol_version": RUNTIME_PROTOCOL_VERSION,
+        "protocol_major_version": RUNTIME_PROTOCOL_MAJOR_VERSION,
+        "deprecated_methods": deprecated_rpc_methods(),
+        "breaking_changes": [dict(change) for change in RUNTIME_BREAKING_CHANGES],
+    }
 
 
 def runtime_error_to_dict(error: Exception) -> dict[str, Any]:

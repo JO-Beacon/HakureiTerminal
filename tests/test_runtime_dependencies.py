@@ -248,8 +248,12 @@ class PackagingConfigurationTests(unittest.TestCase):
         self.assertIn("openai>=1.0.0", optional["all"])
         self.assertIn("pytest>=8.0", groups["dev"])
         self.assertIn("ruff>=0.6.0", groups["dev"])
+        self.assertIn("pyright>=1.1.390", groups["dev"])
+        self.assertIn("build>=1.2.0", groups["dev"])
         self.assertEqual(pyproject["tool"]["pytest"]["ini_options"]["testpaths"], ["tests"])
         self.assertNotIn("asyncio_mode", pyproject["tool"]["pytest"]["ini_options"])
+        self.assertEqual(pyproject["tool"]["coverage"]["report"]["fail_under"], 45)
+        self.assertEqual(pyproject["tool"]["pyright"]["typeCheckingMode"], "basic")
 
 
 class RuntimeModelRpcTests(unittest.TestCase):
@@ -310,6 +314,31 @@ class RuntimeRpcDispatchTests(unittest.TestCase):
         self.assertIn("init", legacy_rpc_methods())
         self.assertIn("install_dependencies", legacy_rpc_methods())
         self.assertIn("send_message_stream", legacy_rpc_methods())
+
+    def test_runtime_protocol_metadata_documents_versions_and_deprecations(self):
+        service = RuntimeService()
+
+        async def run():
+            return await service.handle("runtime.info")
+
+        info = asyncio.run(run())
+
+        self.assertEqual(info["protocol_version"], "1.1.0")
+        self.assertEqual(info["protocol_major_version"], 1)
+        self.assertIn("agent.streaming", info["capabilities"])
+        self.assertIn("runtime.events", info["capabilities"])
+        self.assertEqual(info["breaking_changes"], [])
+        self.assertTrue(info["method_specs"])
+
+        legacy_init = next(item for item in info["deprecated_methods"] if item["method"] == "init")
+        self.assertTrue(legacy_init["deprecated"])
+        self.assertEqual(legacy_init["replacement"], "agent.init")
+        self.assertEqual(legacy_init["remove_after"], "2.0.0")
+
+        runtime_info = next(item for item in info["method_specs"] if item["method"] == "runtime.info")
+        self.assertEqual(runtime_info["namespace"], "runtime")
+        self.assertFalse(runtime_info["legacy"])
+        self.assertFalse(runtime_info["deprecated"])
 
     def test_resolve_rpc_handler_maps_namespaced_and_legacy_methods(self):
         service = RuntimeService()

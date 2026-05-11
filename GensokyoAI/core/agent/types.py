@@ -4,6 +4,7 @@
 
 import msgspec
 import msgspec.json
+from collections.abc import Iterable
 from typing import Any, Sequence
 from msgspec import Struct, field
 
@@ -176,7 +177,7 @@ class UnifiedEmbeddingResponse(Struct):
 
 
 class ProviderCapability:
-    """Provider 能力常量。"""
+    """Provider 能力常量与标准化工具。"""
 
     CHAT = "chat"
     STREAM = "stream"
@@ -191,6 +192,50 @@ class ProviderCapability:
     CUSTOM_ENDPOINT = "custom_endpoint"
     WEB_SEARCH = "web_search"
     STRUCTURED_OUTPUT = "structured_output"
+
+    _ALIASES = {
+        "function_calling": TOOLS,
+        "function_calls": TOOLS,
+        "tool_calling": TOOLS,
+        "tool_calls": TOOLS,
+        "embedding": EMBEDDINGS,
+        "image_input": VISION,
+        "images": IMAGE,
+        "thinking": REASONING,
+        "reasoning_content": REASONING,
+        "response_format": STRUCTURED_OUTPUT,
+        "json_schema": STRUCTURED_OUTPUT,
+        "structured_outputs": STRUCTURED_OUTPUT,
+        "search": WEB_SEARCH,
+        "websearch": WEB_SEARCH,
+        "google_search": WEB_SEARCH,
+    }
+
+    @classmethod
+    def all(cls) -> frozenset[str]:
+        """返回所有受控 Provider 能力名称。"""
+        return frozenset(
+            value
+            for name, value in vars(cls).items()
+            if name.isupper() and isinstance(value, str)
+        )
+
+    @classmethod
+    def normalize_name(cls, capability: str) -> str:
+        """标准化单个能力名，兼容常见同义词。"""
+        value = capability.strip().lower().replace("-", "_").replace(" ", "_")
+        return cls._ALIASES.get(value, value)
+
+    @classmethod
+    def normalize(cls, capabilities: Iterable[str]) -> set[str]:
+        """标准化能力集合，过滤空值并去重。"""
+        return {cls.normalize_name(str(capability)) for capability in capabilities if capability}
+
+    @classmethod
+    def unknown(cls, capabilities: Iterable[str]) -> set[str]:
+        """返回未注册的能力名称，供 contract tests 与诊断使用。"""
+        normalized = cls.normalize(capabilities)
+        return normalized.difference(cls.all())
 
 
 class ModelInfo(Struct):

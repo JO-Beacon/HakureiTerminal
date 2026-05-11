@@ -37,23 +37,24 @@ class OllamaProvider(BaseProvider):
     @property
     def capabilities(self) -> set[str]:
         """Ollama Provider 能力声明。"""
-        return {
-            ProviderCapability.CHAT,
-            ProviderCapability.STREAM,
-            ProviderCapability.TOOLS,
-            ProviderCapability.EMBEDDINGS,
-            ProviderCapability.CUSTOM_ENDPOINT,
-        }
+        return self.apply_model_capability_overrides(
+            {
+                ProviderCapability.CHAT,
+                ProviderCapability.STREAM,
+                ProviderCapability.TOOLS,
+                ProviderCapability.EMBEDDINGS,
+                ProviderCapability.CUSTOM_ENDPOINT,
+            }
+        )
 
     def _build_client(self):
         """构建 Ollama 异步客户端"""
-        try:
-            from ollama import AsyncClient as OllamaAsyncClient
-        except ImportError:
-            raise ImportError(
-                "使用 Ollama Provider 需要安装 ollama 包: pip install ollama\n"
-                "或者: pip install gensokyoai[ollama]"
-            )
+        ollama_module = self.import_optional_dependency(
+            "ollama",
+            "使用 Ollama Provider 需要安装 ollama 包: pip install ollama\n"
+            "或者: pip install gensokyoai[ollama]",
+        )
+        OllamaAsyncClient = ollama_module.AsyncClient
 
         # 根据配置决定是否使用代理
         if not self.config.use_proxy:
