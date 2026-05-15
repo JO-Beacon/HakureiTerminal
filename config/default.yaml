@@ -1,0 +1,209 @@
+# GensokyoAI 默认配置
+
+# 日志配置
+log_level: DEBUG
+log_console: false
+log_file: "logs/GENSOKYOAI.log"
+
+# 静默调试输出：开启后才输出静默思考、内心决策、推理内容等默认隐藏信息
+debug_silent_output: false
+
+# 主聊天模型配置
+model:
+  provider: "ollama"    # LLM Provider: ollama / openai / openrouter / deepseek / openai_responses / gemini / claude
+  name: "qwen3.5:9b"
+  base_url: null        # null 表示使用 Provider 默认地址；也兼容填入完整 endpoint（如 /v1/chat/completions）
+  api_path: null        # 自定义 API path；OpenAI 默认 /chat/completions，Responses 默认 /responses
+  api_key: null         # API 密钥（OpenAI/Gemini/Claude/DeepSeek 等需要，ollama 不需要）
+  extra_headers: {}     # 额外 HTTP 请求头；OpenRouter 可配置 HTTP-Referer / X-Title
+  web_search_enabled: false      # Web search 总开关；默认 false，避免隐私和成本风险
+  web_search_strategy: "off"     # off / explicit / auto；当前执行层仅在 enabled 且非 off 时注入 Provider 内置搜索
+  web_search_context_size: null   # OpenAI Responses web_search_preview 可选：low / medium / high
+  web_search_user_location: {}    # OpenAI Responses 可选用户位置，如 {type: approximate, country: US}
+  web_search_allow_fallback: true # 搜索不可用时允许降级为普通回答
+  web_search_metadata: {}         # Provider 特定搜索参数扩展
+  stream: true
+  think: false
+  thinking_enabled: null # DeepSeek 专用；null 表示使用 Provider 默认值（DeepSeek 默认 true）
+  reasoning_effort: null # DeepSeek 专用；null 表示默认 high，可选 high / max
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 2048
+  timeout: 60
+  use_proxy: false      # 是否使用代理，默认不使用，localhost 直连
+  retry_max_attempts: 3       # 仅对 retry_status_codes 中的临时错误自动重试
+  retry_initial_delay: 1.0    # 首次重试前等待秒数
+  retry_backoff_factor: 2.0   # 指数退避倍率
+  retry_status_codes: [500, 502, 503, 504] # 默认仅重试临时服务端错误；如需重试 429 可显式加入
+
+# Embedding 模型配置（独立于主聊天模型，避免误用聊天模型调用 embeddings）
+# 未配置 name 时，ModelClient.embeddings() 会明确报错，不会再默认使用 model.name。
+embedding:
+  provider: null        # null 表示默认复用 model.provider；Claude 不支持 embeddings，需改用 openai/gemini/ollama 等
+  name: null            # 例如 text-embedding-3-small / BAAI/bge-m3 / nomic-embed-text / gemini-embedding-001
+  base_url: null        # null 表示复用 model.base_url
+  api_key: null         # null 表示复用 model.api_key
+  dimensions: null      # OpenAI text-embedding-3-* 支持缩短维度
+  encoding_format: null # OpenAI 支持 float / base64
+  timeout: null         # null 表示复用 model.timeout
+  use_proxy: null       # null 表示复用 model.use_proxy
+
+# ===== Provider 配置示例 =====
+#
+# --- Ollama（本地）---
+# model:
+#   provider: "ollama"
+#   name: "qwen3.5:9b"
+#   base_url: null              # 默认 http://127.0.0.1:11434
+#
+# --- OpenAI (Chat Completions API，兼容第三方服务) ---
+# model:
+#   provider: "openai"
+#   name: "gpt-4o"
+#   api_key: "sk-..."
+#   base_url: null              # 默认 https://api.openai.com/v1；也可填 https://api.openai.com/v1/chat/completions
+#   api_path: null              # 默认 /chat/completions；自定义代理可设置为 /custom/path
+#   extra_headers: {}           # 可选；传入额外 HTTP headers
+#
+# --- OpenAI Responses API（仅限 OpenAI 官方，推理性能更优） ---
+# model:
+#   provider: "openai_responses"
+#   name: "gpt-5"
+#   api_key: "sk-..."
+#   base_url: null              # 默认 https://api.openai.com/v1；Responses path 默认 /responses
+#   api_path: null              # 如服务商使用自定义 Responses 路径，可在这里覆盖
+#   web_search_enabled: true    # 显式开启后才会注入 web_search_preview
+#   web_search_strategy: "explicit"
+#   web_search_context_size: "medium"
+#
+# --- DeepSeek（推荐使用独立 Provider，支持 thinking/reasoning_content 回传）---
+# model:
+#   provider: "deepseek"
+#   name: "deepseek-v4-pro"
+#   api_key: "sk-..."
+#   base_url: null              # 默认 https://api.deepseek.com
+#   thinking_enabled: true      # 默认 true
+#   reasoning_effort: "high"    # high / max，默认 high
+#
+# --- OpenAI 兼容（DeepSeek 旧配置，不推荐用于 thinking mode）---
+# model:
+#   provider: "openai"
+#   name: "deepseek-chat"
+#   api_key: "sk-..."
+#   base_url: "https://api.deepseek.com/v1"
+#
+# --- OpenAI 兼容（SiliconFlow）---
+# model:
+#   provider: "openai"
+#   name: "Qwen/Qwen2.5-72B-Instruct"
+#   api_key: "sk-..."
+#   base_url: "https://api.siliconflow.cn/v1"
+#
+# --- OpenRouter（推荐：独立 Provider，复用 OpenAI-compatible Chat Completions）---
+# model:
+#   provider: "openrouter"
+#   name: "openai/gpt-4o"
+#   api_key: "sk-or-..."
+#   base_url: null              # 默认 https://openrouter.ai/api/v1；也可填 openrouter.ai / openrouter.ai/api
+#   extra_headers:              # 可选；会覆盖内置 HTTP-Referer / X-Title
+#     HTTP-Referer: "https://your-site.example"
+#     X-Title: "GensokyoAI"
+#
+# --- OpenAI 兼容（OpenRouter 旧写法，仍支持）---
+# model:
+#   provider: "openai"
+#   name: "openai/gpt-4o"
+#   api_key: "sk-or-..."
+#   base_url: "https://openrouter.ai/api"  # 会自动规范化为 https://openrouter.ai/api/v1
+#
+# --- 自定义 OpenAI 兼容代理路径 ---
+# model:
+#   provider: "openai"
+#   name: "custom-model"
+#   api_key: "sk-..."
+#   base_url: "https://proxy.example.com"
+#   api_path: "/custom/chat/completions"
+#
+# --- Claude ---
+# model:
+#   provider: "claude"
+#   name: "claude-sonnet-4-20250514"
+#   api_key: "sk-ant-..."
+#
+# --- Gemini ---
+# model:
+#   provider: "gemini"
+#   name: "gemini-2.0-flash"
+#   api_key: "AIza..."
+#   web_search_enabled: true    # 显式开启后映射 Google Search grounding
+#   web_search_strategy: "explicit"
+
+# 记忆配置
+memory:
+  working_max_turns: 20
+  episodic_threshold: 50
+  episodic_summary_model: qwen3.5:9b
+  episodic_keep_recent: 10
+  semantic_enabled: true
+  semantic_top_k: 5
+  semantic_similarity_threshold: 0.7
+  auto_memory_enabled: true
+  auto_memory_model: qwen3.5:9b
+  
+  # 话题生成配置
+  topic_generation:
+    name_max_length: 10
+    summary_max_length: 100
+
+think_engine:
+  enabled: true
+  think_interval_minutes: 1
+  random_walk_steps_min: 2
+  random_walk_steps_max: 5
+  emotional_trigger_threshold: 0.5
+  emotional_priority_probability: 0.7
+  think_temperature: 0.7
+  think_max_tokens: 200
+  initiative_temperature: 0.8
+  initiative_max_tokens: 100
+
+# 工具配置
+tool:
+  enabled: true
+  custom_tools_path: null
+  web_search:
+    enabled: false           # 自有 web_search 工具总开关；默认关闭，避免隐私和成本风险
+    provider: "bing"         # bing / api / mixed；mixed 会合并 Bing 与 API 结果
+    max_results: 10
+    timeout: 10
+    cache_ttl_seconds: 300
+    trigger_strategy: "explicit" # off / explicit / auto；仅注入提示引导模型调用工具，不自动联网
+    freshness_keywords: ["今天", "今日", "现在", "当前", "最新", "新闻", "价格", "版本", "发布", "更新", "today", "latest", "news", "price", "version"]
+    prefer_for_characters: [] # 角色名命中时，引导其优先联网核验
+    prefer_for_scenarios: []  # system_contexts 场景关键词命中时，引导联网核验
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    region: null             # 例如 zh-CN / en-US，用于 Accept-Language
+    safe_search: "moderate"  # 预留：off / moderate / strict
+    snippet_max_length: 200
+    api:
+      endpoint: null         # 通用搜索 API endpoint，例如 https://api.tavily.com/search
+      method: "POST"         # GET / POST
+      api_key: null
+      api_key_header: "Authorization"
+      api_key_prefix: "Bearer "
+      headers: {}
+      request_template:
+        query: "{query}"
+        count: "{max_results}"
+      query_params: {}
+      results_path: "results"
+      title_path: "title"
+      url_path: "url"
+      snippet_path: "content"
+      published_at_path: null
+
+# 会话配置
+session:
+  auto_save: true
+  save_path: ./sessions
+  max_sessions: 100
