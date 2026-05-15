@@ -8,9 +8,6 @@ log_file: "logs/GENSOKYOAI.log"
 # 静默调试输出：开启后才输出静默思考、内心决策、推理内容等默认隐藏信息
 debug_silent_output: false
 
-# 事件追踪日志：开启后输出每个事件的详细投递日志；默认关闭以降低日志噪声
-event_trace_enabled: false
-
 # 主聊天模型配置
 model:
   provider: "ollama"    # LLM Provider: ollama / openai / openrouter / deepseek / openai_responses / gemini / claude
@@ -173,7 +170,6 @@ think_engine:
 # 工具配置
 tool:
   enabled: true
-  builtin_tools: ["time", "moon", "memory", "system"] # 内置工具白名单；可加入 "web_search" 开启自有联网搜索工具注入
   custom_tools_path: null
   web_search:
     enabled: false           # 自有 web_search 工具总开关；默认关闭，避免隐私和成本风险

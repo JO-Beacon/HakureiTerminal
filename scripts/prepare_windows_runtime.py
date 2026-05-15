@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VERSION = "3.14.0"
 DEFAULT_ARCH = "amd64"
 DEFAULT_CACHE_DIR = ROOT / ".cache" / "python-runtime"
-DEFAULT_TARGET = ROOT / "hakureiterminal" / "assets" / "python" / "runtime"
+DEFAULT_TARGET = ROOT / "assets" / "python" / "runtime"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 
 

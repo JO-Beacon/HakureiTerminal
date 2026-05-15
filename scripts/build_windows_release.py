@@ -8,12 +8,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from prepare_client_python_assets import DEFAULT_BACKEND_DIR
 from prepare_client_python_assets import prepare as prepare_python_assets
-from prepare_windows_runtime import prepare as prepare_windows_runtime
 from prepare_windows_runtime import DEFAULT_ARCH, DEFAULT_CACHE_DIR, DEFAULT_VERSION
+from prepare_windows_runtime import prepare as prepare_windows_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
-CLIENT_DIR = ROOT / "hakureiterminal"
+CLIENT_DIR = ROOT
 CLIENT_PYTHON_ASSET_ROOT = CLIENT_DIR / "assets" / "python"
 CLIENT_RUNTIME_DIR = CLIENT_PYTHON_ASSET_ROOT / "runtime"
 RELEASE_DIR = CLIENT_DIR / "build" / "windows" / "x64" / "runner" / "Release"
@@ -42,6 +43,7 @@ def build_release(
     version: str,
     arch: str,
     cache_dir: Path,
+    backend_dir: Path,
     skip_runtime: bool,
     skip_flutter_build: bool,
     extra_requirements: list[str],
@@ -52,7 +54,7 @@ def build_release(
             shutil.rmtree(preserved_runtime)
         shutil.copytree(CLIENT_RUNTIME_DIR, preserved_runtime)
 
-    prepare_python_assets(CLIENT_PYTHON_ASSET_ROOT, clean=True)
+    prepare_python_assets(CLIENT_PYTHON_ASSET_ROOT, backend_dir=backend_dir, clean=True)
 
     if skip_runtime and preserved_runtime.exists():
         if CLIENT_RUNTIME_DIR.exists():
@@ -84,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", default=DEFAULT_VERSION)
     parser.add_argument("--arch", default=DEFAULT_ARCH, choices=["amd64", "win32", "arm64"])
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    parser.add_argument("--backend-dir", type=Path, default=DEFAULT_BACKEND_DIR)
     parser.add_argument("--skip-runtime", action="store_true")
     parser.add_argument("--skip-flutter-build", action="store_true")
     parser.add_argument(
@@ -101,6 +104,7 @@ def main() -> None:
         version=args.version,
         arch=args.arch,
         cache_dir=args.cache_dir,
+        backend_dir=args.backend_dir,
         skip_runtime=args.skip_runtime,
         skip_flutter_build=args.skip_flutter_build,
         extra_requirements=args.extra_requirement,

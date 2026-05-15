@@ -1,474 +1,353 @@
-<div align = center>
-  <h1>🌸 GensokyoAI - 幻想乡 AI 角色扮演引擎</h1>
-  
-  [![Python Version](https://img.shields.io/badge/python-3.14%2B-blue)](https://www.python.org/)
-  [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-  [![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-</div>
+# HakureiTerminal
 
-> 一个专为角色扮演设计的通用 Python AI Agent 工具包与运行时，支持 Ollama / OpenAI / OpenRouter / DeepSeek / OpenAI Responses / Claude / Gemini 等多种 LLM Provider，提供三层记忆系统、会话管理、工具调用、Provider 抽象和稳定 Runtime API。
+HakureiTerminal 是一个 Flutter 桌面客户端项目，内嵌并调用 GensokyoAI 后端源码快照。
 
-[**使用指南**](./user_guide.md)
-[**项目设计**](./project_design.md)
-[**Runtime API 契约**](./docs/runtime_api.md)
-[**默认配置示例**](./config/default.yaml)
-[**Q群！快来！**](https://qun.qq.com/universal-share/share?ac=1&authKey=2YjM%2FXyrxGTrkTDQMoxKM5QBzphCJzFxbXnKYDpF%2FVkmuNvH2%2BNaP2Z6l7d9LsB%2B&busi_data=eyJncm91cENvZGUiOiI2NzU2MDgzNTYiLCJ0b2tlbiI6IkROTnRsMVlMcWdPUzExZlp5T2RMbDI5eXBGRVNRcDV1blAxY2crWGhrUjdpaWVXSXoybE5CdFRSb3Q5Z3dCa0giLCJ1aW4iOiIyMjI2OTU2NTc5In0%3D&data=UBToZl_UF-gj5B9gKcj0YXcw7qCwC5DKmrw0Sh2-XNjTejEA31jAi1BONVOvh9v5PB98Y0f_Hz-MDvXiFrwnLA&svctype=4&tempid=h5_group_info)
+本仓库现在以 HakureiTerminal 为主项目：
 
-## 项目定位
+- Flutter UI 位于仓库根目录的 `lib/`、`windows/`、`linux/`、`test/`。
+- GensokyoAI 后端源码作为内部组件放在 `backend/GensokyoAI/`。
+- `bridge_main.py` 是 HakureiTerminal 维护的 Python bridge 入口，负责启动内嵌后端 Runtime。
+- 构建时不会从外部下载 GensokyoAI，也不会通过 pip 安装 GensokyoAI；只复制本仓库中的内嵌源码。
+- 仓库根项目 HakureiTerminal 采用 BSD 3-Clause License；内嵌 GensokyoAI 源码快照保留其 MIT License，详见 `THIRD_PARTY_LICENSES.md`。
 
-GensokyoAI 是一个 Python 纯后端工具包。它不绑定任何具体 UI、桌面程序、Web 程序或聊天平台（但自带CLI，所以也可以直接用），而是把角色扮演 Agent 的核心能力封装为可复用的 Python 包与 Runtime API。
+## 架构边界
 
-核心边界：
+HakureiTerminal 是用户界面、配置管理和本地 Runtime 子进程管理层；GensokyoAI 是内嵌后端组件，负责角色推理、记忆、会话、工具调用、Provider 调用和可选依赖管理。
 
-- Python 包负责 Agent、记忆、会话、工具、Provider 调用和可选依赖管理。
-- 外部调用方通过公开 Python API 或 Runtime RPC 使用这些能力。
-- OpenAI、Claude、Gemini、Ollama 等 Provider 的真实调用逻辑位于 Python 后端。
-- Provider SDK 依赖保持可选，不会强制安装全部模型服务依赖。
-- 任意客户端、脚本、服务端适配器或第三方程序都可以在不理解内部实现的情况下调用 Runtime API。
+```mermaid
+flowchart LR
+  A[HakureiTerminal Flutter UI] --> B[PythonBridge]
+  B --> C[bridge_main.py]
+  C --> D[backend/GensokyoAI RuntimeService]
+  D --> E[Agent Memory Session Tools Provider]
+```
 
-## Runtime API
+允许的方向：
 
-GensokyoAI 提供前端无关的 Runtime 边界。机器可读版本、能力、方法清单和废弃方法迁移信息可通过 `runtime.info` 获取；协议细节见 [Runtime API 契约](./docs/runtime_api.md)。
+- Flutter 通过 JSON Lines RPC 调用 Python Runtime。
+- Flutter 传递标准 JSON 参数，例如角色路径、模型配置、Provider 名称。
+- Python Runtime 返回标准 JSON 结果或结构化错误。
 
-- `GensokyoAI/runtime/service.py`：通用 `RuntimeService`。
-- `GensokyoAI/runtime/rpc.py`：RPC 方法注册、分发与 legacy 方法兼容。
-- `GensokyoAI/runtime/dependencies.py`：可选 Provider 依赖检测与白名单安装。
-- `bridge_main.py`：通用 JSON Lines RPC 入口，可被本地客户端或其他进程启动。
+禁止的方向：
 
-当前 Runtime RPC 支持：
+- Flutter 不实现 OpenAI、Claude、Gemini、Ollama 等 Provider 的真实模型调用。
+- Flutter 不直接读写 Python 后端 session 或 memory 文件。
+- Flutter 不向后端传任意 pip 包名或 shell 命令。
+- Python 后端不依赖 Flutter UI、窗口状态或客户端存档结构。
 
-- `runtime.info`
-- `runtime.health`
-- `runtime.shutdown`
-- `agent.init`
-- `agent.send_message`
-- `character.list`
-- `model.list`
-- `model.info`
-- `session.create`
-- `session.list`
-- `session.resume`
+## Runtime 调用
+
+客户端通过 `lib/services/python_bridge.dart` 启动并调用 `bridge_main.py`。
+
+开发环境下，默认从仓库根目录运行：
+
+```cmd
+python bridge_main.py --backend-dir backend --root backend
+```
+
+其中：
+
+- `--backend-dir backend` 表示从 `backend/GensokyoAI` 导入内嵌后端。
+- `--root backend` 表示后端运行根目录使用 `backend`，可读取 `backend/pyproject.toml` 作为版本元数据。
+
+Flutter 开发运行时通常不需要手动调用该命令，`PythonBridge` 会启动 bridge；如需显式指定路径，可以设置：
+
+```cmd
+set HAKUREI_PYTHON_ROOT=C:\path\to\HakureiTerminal
+set HAKUREI_PYTHON_EXECUTABLE=C:\path\to\python.exe
+flutter run -d windows
+```
+
+生产打包环境下，应用会使用随 release 一起复制的 Python runtime：
+
+```text
+Release/
+  hakurei_terminal.exe
+  python/
+    bridge_main.py
+    GensokyoAI/
+    characters/
+    config/
+    runtime/
+      python.exe
+```
+
+## 支持的客户端功能
+
+### 前端版本号
+
+前端版本号只属于 Flutter 客户端，不代表 Python 后端版本。
+
+版本唯一来源是 `pubspec.yaml` 中的 `version` 字段，格式为：
+
+```yaml
+version: 0.0.1+1
+```
+
+其中 `0.0.1` 是用户可见语义化版本，`+1` 是构建号。Flutter 构建默认读取该字段；构建不会自动递增版本号或构建号，只有手动修改 `pubspec.yaml` 时前端版本才会变化。
+
+### 后端版本号
+
+后端版本来自内嵌的 GensokyoAI 源码快照。当前 bridge 会在 `runtime.info` 中返回后端 `package_version`。
+
+本项目不自动跟随上游 GensokyoAI 更新；后端升级、替换、二次修改都由 HakureiTerminal 项目手动控制。
+
+### 许可证边界
+
+仓库根目录的 `LICENSE` 适用于 HakureiTerminal 主项目，许可证为 BSD 3-Clause License。
+
+内嵌后端 `backend/GensokyoAI/` 保留 GensokyoAI 的 MIT License。分发源码或二进制包时，应同时保留根项目 BSD 3-Clause License 与 `THIRD_PARTY_LICENSES.md` 中的 GensokyoAI MIT License 声明。
+
+### 多模型配置
+
+设置页支持维护多套模型配置档案：
+
+- 新建配置。
+- 复制当前配置。
+- 删除配置。
+- 选择当前配置。
+- 编辑主聊天模型。
+- 编辑 embedding 模型。
+- 保存后重新初始化当前角色。
+
+这些配置属于客户端用户设置。保存后，客户端只把当前 active profile 转成 Runtime 初始化所需的标准 JSON 参数传给 Python 后端。
+
+### Provider 依赖检查与安装
+
+Provider SDK 是 Python 后端的可选依赖。HakureiTerminal 只负责触发后端能力，不直接执行 pip 命令。
+
+客户端调用：
+
 - `dependency.status`
 - `dependency.install`
-- `external_tool.status`
 
-旧方法名仍保留兼容：`init`、`send_message`、`list_characters`、`create_session`、`list_sessions`、`resume_session`、`shutdown`、`dependency_status`、`install_dependencies`、`external_tool_status`。
-
-## 可选 Provider 依赖
-
-Provider SDK 保持可选安装：
-
-- `ollama = ["ollama"]`
-- `openai = ["openai>=1.0.0"]`
-- `openrouter = ["openai>=1.0.0"]`
-- `deepseek = ["openai>=1.0.0"]`
-- `openai_responses = ["openai>=1.0.0"]`
-- `claude = ["anthropic>=0.20.0"]`
-- `gemini = ["google-genai>=1.0.0"]`
-- `all = [...]`
-
-依赖检测与安装由后端白名单控制。调用方只能请求 Provider 名称，例如：
+客户端只传 Provider 名称：
+客户端只传 Provider 名称：
 
 ```json
 {"providers":["openai","deepseek"]}
 ```
 
-后端会自行映射到允许安装的 Python 包，不接受任意 pip 包名或 shell 命令。
+后端根据白名单决定需要安装的 Python 包。
 
-## ✨ 核心亮点
+安装策略在设置页中配置：
 
-> 快速知道 GensokyoAI 能带来什么体验。
+- `auto`：启动或角色初始化时自动安装缺失依赖。
+- `ask`：发现缺失依赖时弹窗确认。
+- `manual`：只提示缺失依赖，由用户在设置页手动触发安装。
 
-### 真人般的对话体验
+### 设置存储
 
-GensokyoAI 不是简单的问答机器人，而是围绕“角色扮演”设计的对话引擎。角色可以拥有稳定的人设、说话习惯、问候语和示例对话，在长期交流中更容易保持一致的性格与表达方式。
+当前设置文件：
 
-### 具有更真实的记忆
-
-对话不会只停留在当前一句话。角色可以保留近期上下文，也能把长期交流压缩成记忆，并围绕话题建立联系；后续对话中，系统会尝试检索相关记忆，帮助角色更自然地想起过去内容。
-
-记忆管理不是简单地“全部塞进上下文”。在启用工具调用且模型选择调用记忆工具时，角色可以根据对话内容主动记住或回忆信息，并借助话题和遗忘机制让记忆更像真实交流中的印象，而不是僵硬的记录本。
-
-### 角色有自然活动
-
-启用静默思考后，角色可以在空闲时回顾已有话题、整理思绪；当系统判断时机合适时，还可以主动开口。这让角色不只是被动回答，而更像拥有自己的内心世界。
-
-### 更好的会话管理
-
-支持创建、保存、恢复、列出、删除、回滚、导出和重命名会话；Runtime RPC 已暴露 `session.current`、`session.delete`、`session.export`、`session.rename`、`session.rollback` 等会话管理方法。说错话可以撤回，历史会话可以继续，也可以把完整机器可读的会话包导出给其他程序使用，不同角色也可以分别维护自己的交流记录。
-
-### 可选择不同模型服务
-
-你可以按需求选择本地模型、OpenAI 兼容服务、DeepSeek、Claude 或 Gemini。想要本地免费运行、接入云端大模型，或混合使用不同服务，都可以通过配置完成。
-
-### 更稳定的 API 调用
-
-GensokyoAI 针对外部 AI 服务调用做了稳定性优化：
-
-- 服务商偶发 500 / 502 / 503 / 504 等临时错误时，会自动等待并重试，减少网络波动导致的中断。
-- embeddings 向量调用也复用同一套重试和错误处理逻辑，记忆检索、语义搜索等功能更稳定。
-- 遇到代理或网关返回的大段 HTML 错误页时，会整理成更容易理解的错误提示。
-- OpenAI、OpenAI 兼容服务、OpenAI Responses、OpenRouter、自定义代理等 API 地址写法更加宽容。
-- 支持真正任意 `api_path`：默认路径继续走 SDK，SDK 固定 resource path 无法表达的代理路径会自动切换到自定义 HTTP 调用层。
-- 支持 `extra_headers`、Provider 能力声明、ProviderDefinition 控制面、模型列表查询和更完整的流式元信息。
-- 支持通过统一模型元数据注册表合并 Provider `/models`、内置快照、缓存和用户 override，从模型列表和元数据中推断 `web_search` 等模型级能力；第三方 OpenAI 兼容端点默认不会被高估为支持图片能力。
-- 支持显式开启真实联网搜索执行层：OpenAI Responses 可注入 `web_search_preview`，Gemini 可映射 Google Search grounding；也支持自有 `web_search` 工具走 Bing/API 搜索；默认关闭，不会自动联网。
-- 工具注入由 ToolBuildService 统一决策，会根据模型 tools 能力、工具总开关、builtin_tools 白名单和 Provider 内置搜索配置选择工具 schema 与附加 instructions。
-- 工具错误返回保留旧 `content` / `is_error` 字段，同时提供结构化 `error_code`、`technical_message`、`user_message`、`recoverable`、`action_hint` 和 `details`，便于 UI 展示与恢复动作。
-- 可通过 `retry_max_attempts`、`retry_initial_delay`、`retry_backoff_factor`、`retry_status_codes` 调整自动重试策略。
-- 支持可选 OAuth / Bearer token refresh 基础设施，可在 `401` 后刷新 token 并重试一次，认证事件会自动清洗敏感字段。
-- 支持模型调用 timing 观测，记录请求总耗时、首 chunk、首 token、首 reasoning、推理片段统计、usage 和 finish_reason。
-- 支持统一图片生成与视觉输入抽象，OpenAI 图片生成、OpenAI / Responses / Gemini / Claude 视觉消息转换已接入。
-- 流式输出增加首包和中途卡住的超时保护，避免模型服务无响应时一直等待。
-- Ollama、Gemini、Claude 等非 OpenAI Provider 的流式工具调用和结束事件更统一。
-- 流式工具调用参数解析失败时会保留 `raw_arguments`，方便排查模型输出或网关截断问题。
-- OpenAI Responses 流式 `failed` / `incomplete` 事件会转换成更明确的错误信息。
-- Runtime RPC 提供 `agent.send_message_stream`，可把流式结果转换成稳定 JSON 事件列表，便于现有 JSON Lines 客户端使用，并为后续 WebSocket 逐帧推送打基础。
-
-完整配置示例见 [默认配置](./config/default.yaml)。
-
-## 快速配置 Provider
-
-### OpenAI 官方 Chat Completions
-
-```yaml
-model:
-  provider: "openai"
-  name: "gpt-4o"
-  api_key: "sk-..."
-  base_url: null
+```text
+Windows: %APPDATA%/HakureiTerminal/settings.json
+fallback: .hakurei_terminal_settings.json
 ```
 
-### OpenAI Responses API
+设置内容包括：
 
-```yaml
-model:
-  provider: "openai_responses"
-  name: "gpt-5"
-  api_key: "sk-..."
-  base_url: null
-  web_search_enabled: true
-  web_search_strategy: "explicit"
-  web_search_context_size: "medium"
+- 模型配置档案列表。
+- 当前 active profile。
+- 依赖安装策略。
+
+后续可增加独立客户端 UI 状态存档，例如：
+
+```text
+Windows: %APPDATA%/HakureiTerminal/frontend_state.json
+fallback: .hakurei_terminal_state.json
 ```
 
-### OpenRouter
+该前端存档只保存 UI 状态和展示快照，不替代 Python 后端 session/memory。
 
-```yaml
-model:
-  provider: "openrouter"
-  name: "openai/gpt-4o"
-  api_key: "sk-or-..."
-  base_url: null  # 默认 https://openrouter.ai/api/v1
-  extra_headers:  # 可选；覆盖内置 HTTP-Referer / X-Title
-    HTTP-Referer: "https://your-site.example"
-    X-Title: "GensokyoAI"
+## 开发运行
+
+准备客户端 Python 资产：
+
+```cmd
+python scripts\prepare_client_python_assets.py
 ```
 
-OpenRouter 也兼容旧写法：`provider: "openai"` + `base_url: "https://openrouter.ai/api"`。推荐使用独立 `openrouter` Provider，因为它会内置 OpenRouter 推荐 headers，并从 `/models` 元数据中保留 `context_length`、`input_modalities`、`output_modalities`、`supported_parameters`、`supported_features`、`pricing`、`top_provider`、`per_request_limits` 等字段。
+运行 Flutter Windows 客户端：
 
-OpenRouter Provider 会把常见模型元数据映射为统一能力：`tools`、`vision`、`reasoning`、`web_search`、`structured_output`。如果 OpenRouter 返回的模型元数据不完整，可以继续通过 `model_capabilities_add` / `model_capabilities_remove` 修正能力判断。
-
-### Web search 执行层
-
-真实联网搜索默认关闭。Provider 内置搜索需要在模型配置中显式开启：
-
-```yaml
-model:
-  provider: "openai_responses"  # 或 gemini
-  web_search_enabled: true
-  web_search_strategy: "explicit"
-  web_search_allow_fallback: true
+```cmd
+flutter run -d windows
 ```
 
-OpenAI Responses 会在请求中注入 `web_search_preview` 工具，并把 `url_citation` 等注解转换为统一引用；Gemini 会映射 Google Search grounding，并从 `grounding_metadata` 中提取引用。非流式响应和流式 finish chunk 都可携带 `web_search_references` 与 `web_search_diagnostics`，便于展示来源、记录搜索状态和排查降级原因。
+## Windows release with bundled CPython
 
-不支持 Provider 内置搜索但支持工具调用的模型，可以开启 GensokyoAI 自有 `web_search` 工具：
+从仓库根目录运行：
+后端根据白名单决定需要安装的 Python 包。
 
-```yaml
-tool:
-  enabled: true
-  web_search:
-    enabled: true
-    provider: "bing"   # bing / api / mixed
-    max_results: 10
+安装策略在设置页中配置：
+
+- `auto`：启动或角色初始化时自动安装缺失依赖。
+- `ask`：发现缺失依赖时弹窗确认。
+- `manual`：只提示缺失依赖，由用户在设置页手动触发安装。
+
+### 设置存储
+
+当前设置文件：
+
+```text
+Windows: %APPDATA%/HakureiTerminal/settings.json
+fallback: .hakurei_terminal_settings.json
 ```
 
-自有 `web_search` 工具默认走 Bing HTML 搜索；如果需要接入 Tavily、BoCha、企业搜索等 JSON API，可使用通用 API Provider：
+设置内容包括：
 
-```yaml
-tool:
-  web_search:
-    enabled: true
-    provider: "api"
-    api:
-      endpoint: "https://api.tavily.com/search"
-      method: "POST"
-      api_key: "tvly-..."
-      results_path: "results"
-      title_path: "title"
-      url_path: "url"
-      snippet_path: "content"
+- 模型配置档案列表。
+- 当前 active profile。
+- 依赖安装策略。
+
+后续可增加独立客户端 UI 状态存档，例如：
+
+```text
+Windows: %APPDATA%/HakureiTerminal/frontend_state.json
+fallback: .hakurei_terminal_state.json
 ```
 
-`provider: "mixed"` 会并行执行 Bing 和 API 搜索，并按来源优先级与结果质量排序、去重、截断结果。搜索工具成功时返回 JSON，包含 `items` 和 `diagnostics`，便于模型引用来源并排查搜索状态；配置禁用、Provider 不支持、Provider 失败或无结果等可诊断失败会通过结构化工具错误返回，例如 `web_search.disabled`、`web_search.unsupported_provider`、`web_search.provider_failed`、`web_search.no_results`。
+该前端存档只保存 UI 状态和展示快照，不替代 Python 后端 session/memory。
 
-### 自定义 OpenAI 兼容服务
+## 开发运行
 
-```yaml
-model:
-  provider: "openai"
-  name: "your-model-name"
-  api_key: "sk-..."
-  base_url: "https://your-api.example.com"
+准备客户端 Python 资产：
+
+```cmd
+python scripts\prepare_client_python_assets.py
 ```
 
-### 自定义代理路径
+运行 Flutter Windows 客户端：
 
-```yaml
-model:
-  provider: "openai"
-  name: "your-model-name"
-  api_key: "sk-..."
-  base_url: "https://proxy.example.com"
-  api_path: "/custom/chat/completions"  # 也支持 /custom/generate 这类非标准路径
-  extra_headers:
-    X-Custom-Gateway: "gensokyo"
+```cmd
+flutter run -d windows
 ```
 
-### 自动重试策略
+## Windows release with bundled CPython
 
-```yaml
-model:
-  retry_max_attempts: 3
-  retry_initial_delay: 1.0
-  retry_backoff_factor: 2.0
-  retry_status_codes: [500, 502, 503, 504]
+从仓库根目录运行：
+
+```cmd
+python scripts\build_windows_release.py
 ```
 
-默认只重试临时服务端错误。如果你使用的服务商把 `429` 作为“稍后重试”，可以显式加入：
+该命令会：
 
-```yaml
-model:
-  retry_status_codes: [500, 502, 503, 504, 429]
+1. 从 `backend/GensokyoAI` 复制内嵌 Python 后端源码到 `assets/python/GensokyoAI`。
+2. 复制 `bridge_main.py`、`characters/`、`config/` 和 `requirements.txt` 到 `assets/python`。
+3. 下载官方 Windows embeddable CPython 包。
+4. 为嵌入式 runtime 启用 `import site`。
+5. bootstrap pip，并安装 `requirements.txt` 中的核心依赖。
+6. 构建 Flutter Windows release。
+7. 将完整 Python bundle 复制到 `build/windows/x64/runner/Release/python`。
+
+Release 应用会从自身目录启动：
+
+```text
+python/runtime/python.exe
 ```
 
-不建议盲目重试 `400`、`401`、`403`、`404`，这些通常代表配置、鉴权或请求参数问题。
+因此不需要系统 Python。
 
-### 模型能力覆盖
+## 目录说明
 
-模型列表中的能力会尽量从 Provider 声明、远端 `/models` 元数据和模型名中推断。对于 OpenAI 兼容服务、OpenRouter、Responses、Gemini 等，系统可以标记 `reasoning`、`vision`、`web_search`、`structured_output` 等模型级能力。OpenRouter 的 `supported_parameters`、`supported_features`、`pricing.internal_reasoning`、`input_modalities` 等字段会参与推断。
-
-OpenAI 官方端点会默认声明图片输入与图片生成能力；第三方 OpenAI-compatible endpoint 默认只声明通用文本、工具、embedding 和自定义端点能力，避免把所有兼容服务都误判成支持图片。若第三方服务实际支持图片，可通过远端模型 metadata 或下面的配置显式补充。
-
-如果服务商元数据不完整，或者你确定某个模型能力被误判，可以用配置增补或移除能力：
-
-```yaml
-model:
-  provider: "openai"
-  name: "your-model-name"
-  model_capabilities_add:
-    - "web_search"
-  model_capabilities_remove:
-    - "image_generation"
+```text
+lib/
+  main.dart                         # Flutter UI 入口
+  models/app_settings.dart          # 模型配置档案与依赖策略
+  repositories/chat_repository.dart # Runtime RPC 调用封装
+  screens/settings_screen.dart      # 设置页
+  services/python_bridge.dart       # JSON Lines 子进程桥接
+  services/settings_store.dart      # 客户端设置存储
+backend/
+  GensokyoAI/                       # 内嵌后端源码快照
+  pyproject.toml                    # 后端版本元数据
+characters/                         # 随包默认角色资产
+config/                             # 随包默认配置资产
+scripts/                            # 打包与 runtime 准备脚本
+windows/                            # Windows 桌面壳
+linux/                              # Linux 桌面壳
+test/                               # Flutter 测试
 ```
 
-注意：`web_search` 能力元信息本身不会自动执行联网搜索；只有同时开启 `web_search_enabled: true` 且 `web_search_strategy` 不是 `off` 时，Provider 才会注入内置搜索配置。模型能力查询可通过 `ModelRegistryService` 统一获得，它会合并 Provider 远端列表、内置 fallback 快照、内存缓存和用户能力修正。
+## 验证
 
-### 配置合并语义
+运行 Flutter 静态检查：
 
-用户配置文件会保留 `model` 字段出现信息，因此可以区分“未配置”和“显式配置为默认值”。例如默认配置或上游配置把 `temperature` 设为 `1.2` 时，用户仍可以在自己的配置中显式写回 `0.7`，并按用户意图覆盖：
-
-```yaml
-model:
-  temperature: 0.7
-  max_tokens: 2048
-  timeout: 60
-  retry_max_attempts: 3
+```cmd
+flutter analyze
 ```
 
-这同样适用于 `provider`、`name`、`stream`、`think`、`api_path`、`extra_headers`、`model_capabilities_add` / `model_capabilities_remove` 等 `model` 字段。环境变量仍会在配置文件合并后作为最后一层覆盖。
+运行 Flutter 测试：
 
-### OAuth / token refresh
-
-适用于需要动态 Bearer token 的 OpenAI 兼容服务、Responses API 或内部网关：
-
-```yaml
-model:
-  provider: "openai"
-  name: "your-model-name"
-  base_url: "https://your-api.example.com"
-  auth:
-    auth_type: "bearer"
-    token_url: "https://auth.example.com/oauth/token"
-    client_id: "your-client-id"
-    client_secret: "your-client-secret"
-    refresh_token: "your-refresh-token"
-    refresh_before_seconds: 60
-    allow_401_refresh: true
+```cmd
+flutter test
 ```
 
-也可以通过环境变量覆盖常用认证字段：
+验证 Python bridge：
 
-- `GENSOKYOAI_AUTH_TYPE`
-- `GENSOKYOAI_TOKEN_URL`
-- `GENSOKYOAI_ACCESS_TOKEN`
-- `GENSOKYOAI_REFRESH_TOKEN`
-- `GENSOKYOAI_CLIENT_ID`
-- `GENSOKYOAI_CLIENT_SECRET`
-
-### 图片生成
-
-OpenAI Provider 提供统一图片生成入口：
-
-```python
-from GensokyoAI.core.agent.model_client import ModelClient
-from GensokyoAI.core.config import ModelConfig
-
-client = ModelClient(
-    ModelConfig(provider="openai", name="gpt-image-1", api_key="sk-...")
-)
-
-result = await client.generate_image(
-    "画一只在博丽神社喝茶的猫",
-    size="1024x1024",
-    n=1,
-)
-
-print(result.images[0].url or result.images[0].data)
+```cmd
+python bridge_main.py --backend-dir backend --root backend
+```
+```cmd
+python scripts\build_windows_release.py
 ```
 
-返回值会统一为 `ImageGenerationResult`，每张图为 `GeneratedImage`，支持 URL、base64 data、mime_type、revised_prompt 和 metadata。
+该命令会：
 
-### 视觉输入
+1. 从 `backend/GensokyoAI` 复制内嵌 Python 后端源码到 `assets/python/GensokyoAI`。
+2. 复制 `bridge_main.py`、`characters/`、`config/` 和 `requirements.txt` 到 `assets/python`。
+3. 下载官方 Windows embeddable CPython 包。
+4. 为嵌入式 runtime 启用 `import site`。
+5. bootstrap pip，并安装 `requirements.txt` 中的核心依赖。
+6. 构建 Flutter Windows release。
+7. 将完整 Python bundle 复制到 `build/windows/x64/runner/Release/python`。
 
-聊天消息的 `content` 可以继续使用字符串，也可以使用统一多模态片段：
+Release 应用会从自身目录启动：
 
-```python
-from GensokyoAI.core.agent.types import ImageInput, MessageContentPart
-
-messages = [
-    {
-        "role": "user",
-        "content": [
-            MessageContentPart(type="text", text="请描述这张图"),
-            MessageContentPart(
-                type="image",
-                image=ImageInput(url="https://example.com/image.png", detail="low"),
-            ),
-        ],
-    }
-]
-
-response = await client.chat(messages)
+```text
+python/runtime/python.exe
 ```
 
-Provider 会自动转换为目标服务格式：
+因此不需要系统 Python。
 
-- OpenAI Chat Completions：`text` / `image_url`
-- OpenAI Responses：`input_text` / `input_image`
-- Gemini：`text` / `inline_data` / `file_data`
-- Claude：`text` / `image` content blocks
+## 目录说明
 
-## Runtime RPC 能力
-
-GensokyoAI 提供前端无关的 Runtime 服务边界，当前可通过 [`bridge_main.py`](./bridge_main.py) 使用 JSON Lines RPC，也可通过 [`runtime_http.py`](./runtime_http.py) 启动 HTTP / WebSocket adapter。核心服务由 [`RuntimeService`](./GensokyoAI/runtime/service.py) 提供，RPC 方法映射由 [`dispatch_rpc()`](./GensokyoAI/runtime/rpc.py) 复用。客户端可以通过 `runtime.info` 查询当前支持的方法。
-
-当前已暴露的主要能力包括：
-
-- `agent.init`：初始化角色、配置与会话。
-- `agent.send_message`：发送非流式消息并返回最终回复。
-- `agent.send_message_stream`：返回稳定 JSON 事件列表，事件包含 `content` 和最终 `finish`，并可透传 `status`、`error`、`usage`、`finish_reason` 等字段。
-- `character.list`：列出可用角色配置。
-- `model.list` / `model.info`：查询当前 Provider 的模型列表和模型元信息。
-- `session.create` / `session.list` / `session.current` / `session.resume`：创建、列出、查询当前和恢复会话。
-- `session.delete`：删除会话；删除当前会话后返回空当前会话，并附带剩余会话数量和列表。
-- `session.rollback`：回滚当前会话，返回回滚前后的轮数与消息数，便于客户端刷新界面。
-- `session.export`：导出完整机器可读会话包，包含格式版本、导出时间、角色、会话元信息、消息列表、消息数量和 Runtime 基本信息。
-- `session.rename`：重命名会话，标题保存到会话 `metadata.title` 中，不改变旧会话文件结构。
-- `dependency.status` / `dependency.install`：查询和安装白名单内 Provider 可选依赖。
-- `external_tool.status`：查询外部工具来源状态。
-
-HTTP / WebSocket adapter 启动示例：
-
-```bash
-python runtime_http.py --host 127.0.0.1 --port 8765
+```text
+lib/
+  main.dart                         # Flutter UI 入口
+  models/app_settings.dart          # 模型配置档案与依赖策略
+  repositories/chat_repository.dart # Runtime RPC 调用封装
+  screens/settings_screen.dart      # 设置页
+  services/python_bridge.dart       # JSON Lines 子进程桥接
+  services/settings_store.dart      # 客户端设置存储
+backend/
+  GensokyoAI/                       # 内嵌后端源码快照
+  pyproject.toml                    # 后端版本元数据
+characters/                         # 随包默认角色资产
+config/                             # 随包默认配置资产
+scripts/                            # 打包与 runtime 准备脚本
+windows/                            # Windows 桌面壳
+linux/                              # Linux 桌面壳
+test/                               # Flutter 测试
 ```
 
-可用端点：
+## 验证
 
-- `GET /health`：返回 Runtime 健康状态。
-- `GET /info`：返回 Runtime 方法列表和能力信息。
-- `POST /rpc`：接收 `{"id": 1, "method": "runtime.health", "params": {}}` 形式的 JSON RPC 请求。
-- `WebSocket /ws`：接收同样的 JSON RPC 请求；普通方法返回单帧响应，`agent.send_message_stream` 会把 `events` 拆成多帧 `event` 推送，最后发送 `done: true` 的结果帧。
+运行 Flutter 静态检查：
 
-说明：JSON Lines RPC 与 HTTP `POST /rpc` 仍是一请求一响应；WebSocket adapter 已能对 `agent.send_message_stream` 的事件列表逐事件推送。当前逐事件推送发生在 adapter 层，后续仍可继续把 RuntimeService 内部升级成真正边生成边产出事件的 async iterator。
+```cmd
+flutter analyze
+```
 
-## API 调用层能力
+运行 Flutter 测试：
 
-GensokyoAI 的模型调用层采用 Provider 抽象，统一封装不同模型服务的差异。
+```cmd
+flutter test
+```
 
-- Provider 会声明自身支持的能力，例如 chat、stream、tools、embeddings、reasoning、vision、image_generation、image_edit、responses_api、custom_endpoint、web_search。
-- OpenAI 兼容 Provider 支持拉取 `/models`，失败时会返回当前配置模型作为 fallback；Claude 当前返回配置模型作为稳定 fallback。
-- OpenAI 官方端点默认声明图片能力；第三方 OpenAI-compatible endpoint 默认不声明图片能力，需要依赖远端 metadata 或 `model_capabilities_add` 显式补充。
-- 模型级能力会结合远端 metadata、模型名和 `model_capabilities_add` / `model_capabilities_remove` 配置推断；真实联网搜索由 `web_search_enabled` 和 `web_search_strategy` 显式控制。
-- chat、chat_stream、embeddings、generate_image 会尽量使用统一的错误归一化、自动重试、认证准备和事件记录逻辑。
-- 流式响应现在也有首包和迭代超时保护，模型服务长时间无响应时会给出明确超时错误。
-- 流式响应块可携带 `status`、`error`、`usage`、`finish_reason`，便于 UI、日志和上层运行时感知重试、结束原因和 token 用量。
-- Ollama、Gemini、Claude 的工具调用和结束事件会尽量按统一 `tool_call` / `finish` 形式输出。
-- 流式工具调用参数解析失败时会在 `tool_info.raw_arguments` 保留原始参数文本，帮助排查工具调用问题。
-- OpenAI Responses 流式失败或不完整事件会转成明确错误，避免表现为无提示中断。
-- `MODEL_CALL_TIMING` 事件可用于记录 chat、chat_stream、embeddings、generate_image 的调用耗时与推理统计。
-- `MODEL_AUTH` 事件可用于观察 token 刷新开始、完成和失败，事件数据会清洗密钥与 token。
-- 自定义 Provider 可以通过 capabilities、supports 和 list_models 接入统一能力体系。
-- Provider 控制面由 `ProviderDefinition` 集中描述，新增 Provider 时主要补充一处定义表和 Provider 实现。
-- 模型元数据查询由 `ModelRegistryService` 统一处理，可在 Provider API 失败时使用缓存或内置快照 fallback。
-- 工具 schema 与工具说明由 `ToolBuildService` 统一构建，`ToolRegistry` 主要负责发现和注册工具。
-- 工具执行失败会产生结构化 `ToolError`；`ToolExecutor` 返回旧字段兼容的 tool message，同时在 `error` 字段和 `TOOL_CALL_FAILED` 事件中提供 error_code、用户提示、技术原因、恢复建议和 details。
+验证 Python bridge：
 
-## 交流讨论
-
-**欢迎来提供功能建议、BUG 反馈以及纯粹交流ᗜᴗᗜ！**
-
-- [QQ群: 675608356](https://qun.qq.com/universal-share/share?ac=1&authKey=2YjM%2FXyrxGTrkTDQMoxKM5QBzphCJzFxbXnKYDpF%2FVkmuNvH2%2BNaP2Z6l7d9LsB%2B&busi_data=eyJncm91cENvZGUiOiI2NzU2MDgzNTYiLCJ0b2tlbiI6IkROTnRsMVlMcWdPUzExZlp5T2RMbDI5eXBGRVNRcDV1blAxY2crWGhrUjdpaWVXSXoybE5CdFRSb3Q5Z3dCa0giLCJ1aW4iOiIyMjI2OTU2NTc5In0%3D&data=UBToZl_UF-gj5B9gKcj0YXcw7qCwC5DKmrw0Sh2-XNjTejEA31jAi1BONVOvh9v5PB98Y0f_Hz-MDvXiFrwnLA&svctype=4&tempid=h5_group_info)
-
-## 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-如果你：
-
-- 写了新的角色配置文件，欢迎分享到 `characters/` 目录。
-- 开发了新的 Provider、工具、记忆能力或 Runtime 适配器，欢迎 PR。
-- 发现了 bug 或有功能建议，请提交 Issue。
-
-## 待办事项
-
-- [x] HTTP / WebSocket Runtime adapter 第一阶段
-- [ ] 多角色同时对话
-- [ ] 语音输入 / 输出
-- [ ] 更多内置工具
-
-## 许可证
-
-MIT License - 详见 [LICENSE](LICENSE) 文件。
-
-## 🙏 致谢
-
-- [Ollama](https://ollama.ai/) - 本地模型运行
-- [OpenAI](https://openai.com/) - OpenAI API 及兼容生态
-- [UV](https://github.com/astral-sh/uv) - UV包管理器
-- [Rich](https://github.com/Textualize/rich) - 终端美化
-- [msgspec](https://github.com/jcrist/msgspec) - 高性能序列化
-- [ayafileio](https://github.com/Patchouli-CN/ayafileio) - 高性能异步文件 I/O
-- [上海爱丽丝幻乐团](http://www16.big.or.jp/~zun/) - 创造了幻想乡
-
-## 🌟 Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Patchouli-CN/GensokyoAI&type=Date)](https://star-history.com/#Patchouli-CN/GensokyoAI&Date)
-
----
-
-**Made with ❤️ and 🍵 in Gensokyo**
-
-*“只有华丽并不是魔法，弹幕最重要的是火力 DA⭐ZE！” —— 雾雨魔理沙*
+```cmd
+python bridge_main.py --backend-dir backend --root backend
+```
