@@ -125,7 +125,7 @@ GENSOKYOAI_MEMORY_WORKING_TURNS 工作记忆最大轮数
 
 许可证
 ------
-BSD-3-Clause License
+MIT License
 
 作者
 ------
@@ -139,7 +139,7 @@ https://github.com/Patchouli-CN/GensokyoAI
 
 __version__ = "0.1.0"
 __author__ = "Patchouli-CN"
-__license__ = "BSD-3-Clause"
+__license__ = "MIT"
 __email__ = "3072252442@qq.com"
 
 # 导出主要类和函数
