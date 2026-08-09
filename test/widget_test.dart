@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -21,6 +22,17 @@ import 'package:hakurei_terminal/services/runtime/runtime_reply.dart';
 import 'package:hakurei_terminal/services/runtime/runtime_stream_event.dart';
 
 void main() {
+  test('TTS startup stop event keeps the active message controls', () {
+    expect(
+      shouldClearTtsMessage(state: PlayerState.stopped, busy: true),
+      isFalse,
+    );
+    expect(
+      shouldClearTtsMessage(state: PlayerState.completed, busy: false),
+      isTrue,
+    );
+  });
+
   test('remote session title reads Runtime metadata.title', () {
     expect(
       sessionTitleFromRemoteJson(<String, dynamic>{

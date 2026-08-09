@@ -278,6 +278,72 @@ class EmbeddingServiceSettings {
   }
 }
 
+class TtsSettings {
+  const TtsSettings({
+    this.enabled = false,
+    this.baseUrl = '',
+    this.apiKey = '',
+    this.model = '',
+    this.voice = '',
+    this.speed = 1.0,
+    this.responseFormat = 'mp3',
+  });
+
+  final bool enabled;
+  final String baseUrl;
+  final String apiKey;
+  final String model;
+  final String voice;
+  final double speed;
+  final String responseFormat;
+
+  bool get isConfigured =>
+      enabled &&
+      baseUrl.trim().isNotEmpty &&
+      model.trim().isNotEmpty &&
+      voice.trim().isNotEmpty;
+
+  TtsSettings copyWith({
+    bool? enabled,
+    String? baseUrl,
+    String? apiKey,
+    String? model,
+    String? voice,
+    double? speed,
+    String? responseFormat,
+  }) => TtsSettings(
+    enabled: enabled ?? this.enabled,
+    baseUrl: baseUrl ?? this.baseUrl,
+    apiKey: apiKey ?? this.apiKey,
+    model: model ?? this.model,
+    voice: voice ?? this.voice,
+    speed: speed ?? this.speed,
+    responseFormat: responseFormat ?? this.responseFormat,
+  );
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'enabled': enabled,
+    'base_url': baseUrl,
+    'api_key': apiKey,
+    'model': model,
+    'voice': voice,
+    'speed': speed,
+    'response_format': responseFormat,
+  };
+
+  factory TtsSettings.fromJson(Map<String, dynamic> json) => TtsSettings(
+    enabled: _boolFromJson(json['enabled']),
+    baseUrl: json['base_url']?.toString() ?? '',
+    apiKey: json['api_key']?.toString() ?? '',
+    model: json['model']?.toString() ?? '',
+    voice: json['voice']?.toString() ?? '',
+    speed:
+        double.tryParse(json['speed']?.toString() ?? '')?.clamp(0.25, 4.0) ??
+        1.0,
+    responseFormat: json['response_format']?.toString() ?? 'mp3',
+  );
+}
+
 class ModelProfile {
   const ModelProfile({
     required this.id,
@@ -776,6 +842,7 @@ class AppSettings {
     this.developer = const DeveloperSettings(),
     this.shortcuts = const ShortcutSettings(),
     this.appearance = const AppearanceSettings(),
+    this.tts = const TtsSettings(),
     this.activeUserRoleId = 'user_default',
     this.userRoles = const <UserRoleSettings>[
       UserRoleSettings(id: 'user_default', nickname: '你'),
@@ -793,6 +860,7 @@ class AppSettings {
   final DeveloperSettings developer;
   final ShortcutSettings shortcuts;
   final AppearanceSettings appearance;
+  final TtsSettings tts;
   final String activeUserRoleId;
   final List<UserRoleSettings> userRoles;
 
@@ -827,6 +895,7 @@ class AppSettings {
     DeveloperSettings? developer,
     ShortcutSettings? shortcuts,
     AppearanceSettings? appearance,
+    TtsSettings? tts,
     String? activeUserRoleId,
     List<UserRoleSettings>? userRoles,
   }) {
@@ -866,6 +935,7 @@ class AppSettings {
       developer: developer ?? this.developer,
       shortcuts: shortcuts ?? this.shortcuts,
       appearance: appearance ?? this.appearance,
+      tts: tts ?? this.tts,
       activeUserRoleId: nextActiveUserRoleId,
       userRoles: nextUserRoles,
     );
@@ -983,6 +1053,7 @@ class AppSettings {
       'developer': developer.toJson(),
       'shortcuts': shortcuts.toJson(),
       'appearance': appearance.toJson(),
+      'tts': tts.toJson(),
       'active_user_role_id': activeUserRoleId,
       'user_roles': userRoles.map((role) => role.toJson()).toList(),
     };
@@ -1089,6 +1160,9 @@ class AppSettings {
               Map<String, dynamic>.from(json['appearance'] as Map),
             )
           : const AppearanceSettings(),
+      tts: json['tts'] is Map
+          ? TtsSettings.fromJson(Map<String, dynamic>.from(json['tts'] as Map))
+          : const TtsSettings(),
       activeUserRoleId: activeUserRoleId,
       userRoles: userRoles,
     );

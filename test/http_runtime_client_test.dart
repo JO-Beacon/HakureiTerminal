@@ -245,10 +245,35 @@ void main() {
       );
     });
 
-    test('refuses world RPCs before any network request', () async {
+    test('sends read-only world RPC with the persisted agent id', () async {
+      unawaited(
+        _serveOnce(server, (request) async {
+          final payload =
+              jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+          expect(payload['method'], 'world.state');
+          expect(
+            payload['params'],
+            containsPair('agent_id', 'agent-runtime-1'),
+          );
+          await _writeRpcResult(request, payload['id'], <String, dynamic>{
+            'world_id': 'gensokyo',
+            'session_id': 'world-session',
+          });
+        }),
+      );
+
+      final result = await client.call('world.state');
+
+      expect(result, containsPair('world_id', 'gensokyo'));
+      expect(client.activeSessionId, isNull);
+    });
+
+    test('rejects world write RPC before contacting the Runtime', () async {
       await expectLater(
-        client.call('world.state'),
-        throwsA(isA<UnsupportedError>()),
+        client.call('world.session.delete', <String, dynamic>{
+          'session_id': 'world-session',
+        }),
+        throwsUnsupportedError,
       );
     });
 

@@ -1,6 +1,6 @@
 # External Runtime Migration
 
-HakureiTerminal no longer hosts any chat runtime. It is a dedicated frontend for an independently deployed GensokyoAI Agent v2 service over HTTP/WebSocket. That service is the sole authority for executable characters, sessions, messages, context, memory, scenes, tools, timers, and generation state. The client requires Runtime protocol major version `2`, has no v1 fallback, and does not integrate `world.*`.
+HakureiTerminal no longer hosts any chat runtime. It is a dedicated frontend for an independently deployed GensokyoAI Agent v2 service over HTTP/WebSocket. That service is the sole authority for executable characters, sessions, messages, context, memory, scenes, Worlds, tools, timers, and generation state. The client requires Runtime protocol major version `2` and has no v1 fallback. When `world.orchestration` is declared, the client can read public World state, roster, transcript, and archive lists.
 
 ## Legacy Local Data
 
@@ -46,7 +46,7 @@ GensokyoAI can use Provider configuration managed entirely on its own server. Th
 
 Alternatively, click the key action for a connection and explicitly confirm delegation of the current HakureiTerminal model profile. On a later `agent.init`, the client sends that profile's model and embedding Provider settings, including API keys, to that one Runtime instance. The Runtime does not receive the profile merely because the connection was saved, tested, or connected.
 
-HakureiTerminal retains model profiles for this explicit delegation. It may also read a user-configured Provider's model list or model metadata only after an explicit refresh action; it never uses the Provider for generation or other execution.
+HakureiTerminal retains text-model profiles for this explicit delegation. It may also read a user-configured text-model Provider's model list or model metadata only after an explicit refresh action; it never uses that Provider for generation or other text-model execution. A separately configured TTS Provider is a client-owned media feature and is requested only after the user clicks a message read-aloud action.
 
 Delegation is instance-level initialization data, not a persistent Provider profile managed by HakureiTerminal on the server. It lasts until service restart, another initialization, or local revocation. Revocation blocks future delegation but cannot remotely erase credentials already received. Do not delegate to a Runtime or operator you do not trust.
 

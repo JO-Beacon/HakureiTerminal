@@ -39,6 +39,7 @@
 
 - 会话、语义记忆、场景、外部工具和主动定时器均通过公开 RPC 管理。
 - Provider 模型列表和模型元数据由用户在设置页明确触发后，使用用户配置的 Base URL 和凭据直接读取；不调用 Runtime `model.list`。结果仅作为可丢弃的 UI 数据，不用于客户端执行模型。
+- 声明 `world.orchestration` 时，客户端只读调用 `world.state`、`world.roster`、`world.transcript` 和 `world.session.list`；每个请求使用连接持久化的 `agent_id`，World 响应不会覆盖普通 Agent 的活动会话。
 - `memory.add` 支持 `content`、`topic_name`、`importance` 和 `emotional_valence`。
 - 主动消息总开关使用 `initiative_timer.update(enabled: bool)`。`initiative_timer.hesitation*` 已退役且设置会被上游忽略，客户端不再调用或展示它。
 - Runtime 没有只读主动消息总开关的方法；UI 初始显示未知状态，只有用户明确设置后才显示服务端回显，避免伪造权威状态。
@@ -55,12 +56,12 @@
 
 ## 明确排除
 
-- HakureiTerminal 不调用任何 `world.*`。客户端在发起网络请求前显式拒绝该命名空间。
-- 不读取 Runtime 服务端磁盘、不复制上游实现、不安装或启动 GensokyoAI，不直接调用模型 Provider 执行生成、Embedding、工具或上下文处理。直接 Provider 访问仅限用户明确触发的模型列表和模型元数据读取。
+- 不读取 Runtime 服务端磁盘、不复制上游实现、不安装或启动 GensokyoAI，不直接调用文本模型 Provider 执行聊天生成、Embedding、工具或上下文处理。直接文本模型 Provider 访问仅限用户明确触发的模型列表和模型元数据读取。
+- 客户端自有 TTS 可在用户点击朗读后调用独立配置的专用 Provider；它不修改 Runtime 权威状态，也不提供文本生成 fallback。
 - 不把本地角色草稿、显示缓存或旧存档恢复成服务端执行状态。
 
 ## 验证边界
 
-仓库测试覆盖公开请求 envelope、分页、revision、幂等、流 ack、状态恢复、事件游标、multipart 上传、结构化图片消息、管理 RPC 和 `world.*` 发网前拒绝。
+仓库测试覆盖公开请求 envelope、分页、revision、幂等、流 ack、状态恢复、事件游标、multipart 上传、结构化图片消息、管理 RPC、World `agent_id` 注入和 Agent/World 会话状态隔离。
 
 真实 Runtime 冒烟不由离线测试替代；需要用户提供已启动的 `2026.8.8.0` Runtime 地址、具备相应角色的凭据和可用 Agent 后另行执行。

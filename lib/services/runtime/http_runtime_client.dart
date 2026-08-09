@@ -150,6 +150,12 @@ class GensokyoAiHttpRuntimeClient {
     String method, [
     Map<String, dynamic> params = const <String, dynamic>{},
   ]) async {
+    if (method.startsWith('world.') &&
+        !_readOnlyWorldMethods.contains(method)) {
+      throw UnsupportedError(
+        'HakureiTerminal only supports documented read-only world methods',
+      );
+    }
     final preparedParams = _prepareParams(method, params);
     final request = await _httpClient.postUrl(
       _endpointPolicy.rpcUri(connection.baseUrl),
@@ -776,12 +782,10 @@ class GensokyoAiHttpRuntimeClient {
     String method,
     Map<String, dynamic> params,
   ) {
-    if (method.startsWith('world.')) {
-      throw UnsupportedError('HakureiTerminal does not integrate world.*');
-    }
     final prepared = <String, dynamic>{...params};
     final isResourceMethod = _resourcePrefixes.any(method.startsWith);
     if (method == 'agent.init' ||
+        method.startsWith('world.') ||
         (isResourceMethod && method != 'agent.list')) {
       prepared.putIfAbsent('agent_id', () => connection.agentId);
     }
@@ -821,6 +825,7 @@ class GensokyoAiHttpRuntimeClient {
 
   void _recordResult(String method, Object? result) {
     if (result is! Map) return;
+    if (method.startsWith('world.')) return;
     final mapped = Map<String, dynamic>.from(result);
     final session = mapped['session'];
     if (session is Map) {
@@ -1057,7 +1062,15 @@ const List<String> _resourcePrefixes = <String>[
   'initiative_timer.',
   'model.',
   'media.',
+  'world.',
 ];
+
+const Set<String> _readOnlyWorldMethods = <String>{
+  'world.state',
+  'world.roster',
+  'world.transcript',
+  'world.session.list',
+};
 
 const Set<String> _sessionMethods = <String>{
   'agent.send_message',
