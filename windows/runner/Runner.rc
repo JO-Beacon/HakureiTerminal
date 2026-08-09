@@ -93,7 +93,7 @@ BEGIN
             VALUE "FileDescription", "HakureiTerminal" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "HakureiTerminal" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 HakureiTerminal contributors. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 JO-Beacon. All rights reserved." "\0"
             VALUE "OriginalFilename", "hakurei_terminal.exe" "\0"
             VALUE "ProductName", "HakureiTerminal" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"

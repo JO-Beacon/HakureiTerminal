@@ -1,241 +1,133 @@
 # HakureiTerminal
 
-HakureiTerminal 是一个 Flutter 桌面客户端项目，内嵌并调用 GensokyoAI 后端源码快照。
+HakureiTerminal 是独立部署的 GensokyoAI Agent v2 Runtime 的专用 Flutter 前端。GensokyoAI 是可执行角色、聊天会话、消息、上下文、记忆、场景、工具、定时器和生成状态的唯一权威；HakureiTerminal 不包含聊天运行时，也不直接调用模型 Provider 执行生成、Embedding 或工具。用户明确操作时，客户端可直接读取用户配置 Provider 的模型列表和模型元数据。客户端只支持 Runtime 协议主版本 `2`，不兼容 v1，也不接入 `world.*`。
 
-本仓库现在以 HakureiTerminal 为主项目：
+客户端只使用 GensokyoAI 的公开 HTTP/WebSocket Runtime 契约。HakureiTerminal 不下载、安装、解包、启动或更新 GensokyoAI，不包含 Python bridge、嵌入式 Python、Chaquopy、本地角色部署逻辑，也不在源码、APK、桌面包、安装器或默认资源中分发 GensokyoAI 源码及其他第三方 Runtime payload。未连接时，应用仍可用于配置、非可执行角色草稿和一次性展示缓存，但不能聊天。
 
-- Flutter UI 位于仓库根目录的 `lib/`、`windows/`、`linux/`、`test/`。
-- GensokyoAI 后端源码作为内部组件放在 `backend/GensokyoAI/`。
-- `bridge_main.py` 是 HakureiTerminal 维护的 Python bridge 入口，负责启动内嵌后端 Runtime。
-- 构建时不会从外部下载 GensokyoAI，也不会通过 pip 安装 GensokyoAI；只复制本仓库中的内嵌源码。
-- 仓库根项目 HakureiTerminal 采用 BSD 3-Clause License；内嵌 GensokyoAI 源码快照保留其 MIT License，详见 `THIRD_PARTY_LICENSES.md`。
-
-## 架构边界
-
-HakureiTerminal 是用户界面、配置管理和本地 Runtime 子进程管理层；GensokyoAI 是内嵌后端组件，负责角色推理、记忆、会话、工具调用、Provider 调用和可选依赖管理。
+## Architecture
 
 ```mermaid
 flowchart LR
-  A[HakureiTerminal Flutter UI] --> B[PythonBridge]
-  B --> C[bridge_main.py]
-  C --> D[backend/GensokyoAI RuntimeService]
-  D --> E[Agent Memory Session Tools Provider]
+  UI[Flutter configuration, draft and cache UI] --> LOCAL[Local settings, non-executable drafts, display caches and media]
+  UI --> CLIENT[HakureiTerminal HTTP/WebSocket client]
+  CLIENT --> EXT[Independently deployed GensokyoAI Agent v2 Runtime]
+  EXT --> PROVIDER[Provider selected by Runtime or explicitly delegated profile]
 ```
 
-允许的方向：
+- 所有聊天通过 `runtime.info`、`/health`、`/ready`、`/rpc` 和 `/ws` 接入用户明确选择的 GensokyoAI Runtime。客户端不读取服务端磁盘目录或私有配置。
+- GensokyoAI 是可执行角色、会话、消息历史、上下文、记忆、场景、工具、定时器、主动事件和生成状态的唯一权威。远端 ID 和展示缓存不构成可编辑或可执行的本地副本。
+- 本地客户端创作的角色仅是非可执行草稿。编辑、导入、恢复或启动应用均不会上传草稿。用户可以选择现成的 `.gensokyo-character` 包，经显示目标连接、文件和导入选项的独立确认后调用公开管理员端点；本地草稿不会被隐式转换或上传。
+- Runtime 离线、未配置或拒绝请求时，配置、草稿、媒体和缓存 UI 仍可使用，但客户端不能聊天，也不会本地执行或降级到 Provider。
 
-- Flutter 通过 JSON Lines RPC 调用 Python Runtime。
-- Flutter 传递标准 JSON 参数，例如角色路径、模型配置、Provider 名称。
-- Python Runtime 返回标准 JSON 结果或结构化错误。
+## External Runtime Connection
 
-禁止的方向：
+GensokyoAI 必须由用户或运维方在 HakureiTerminal 之外部署、配置 Provider、保护网络入口并启动。HakureiTerminal 没有本地安装入口。详细迁移步骤见 `docs/external-runtime-migration.md`。
 
-- Flutter 不实现 OpenAI、Claude、Gemini、Ollama 等 Provider 的真实模型调用。
-- Flutter 不直接读写 Python 后端 session 或 memory 文件。
-- Flutter 不向后端传任意 pip 包名或 shell 命令。
-- Python 后端不依赖 Flutter UI、窗口状态或客户端存档结构。
+当前连接流程如下：
 
-## Runtime 调用
+1. 在“设置 -> 服务管理 -> 外部服务连接”添加显示名称、Runtime 根 URL 和可选 token。保存只写入本地 `settings.json`，不会发起网络请求。
+2. 点击“测试连接”。客户端先以 `POST <base>/rpc` 调用 `runtime.info` 读取版本、方法、传输和流协议，再以 `GET <base>/health` 与 `GET <base>/ready` 检查健康和就绪状态。
+3. 客户端只接受 `protocol_major_version == 2`，并检查 Agent 生命周期、消息状态、会话、角色发现和 WebSocket v2 ack 所需的公开能力；`world.*` 不属于客户端能力范围。
+4. 测试成功后才能启用。启用只建立 `<base>/ws` 并读取本地已知映射；不会自动初始化角色、恢复会话或扫描其他角色的会话。
+5. 每个连接持久化一个客户端生成的 UUID `agent_id`。用户明确选择角色和会话后，客户端以单一串行事务执行 `agent.init`，成功后才用该 `agent_id` 发送 `runtime.subscribe` 并分页读取 Runtime 权威历史及会话 `revision`。
+6. 普通管理 RPC 使用 `POST <base>/rpc`。外部消息使用 WebSocket `agent.send_message_stream`，携带显式 `agent_id`、`session_id`、`expected_revision` 和每次操作唯一的 `idempotency_key`；客户端先消费 v2 ack 中的 `stream_id` / `generation_id`，取消使用 `runtime.cancel_stream`。
+7. `session.list` 与 `session.messages` 按游标读取全部页面。事件订阅保存最后 `sequence`，重连时以 `after_sequence` 恢复。
+8. WebSocket 断开或发送超时后，客户端先用原 `idempotency_key` 调用 `message.status`，再读取 `session.messages` 对账；状态未确认时禁止以新 key 重发。客户端不启动本地服务，也不进行无限自动重试。
+9. 图片只在用户按下发送后上传到 `POST <base>/media`，消息引用服务端 `media_id`。角色包只在独立确认后上传到公开 `/character-packages` 管理员端点。
 
-客户端通过 `lib/services/python_bridge.dart` 启动并调用 `bridge_main.py`。
+保存连接和应用启动都不会连接，导入 `.jovarchive` 也不会连接：导入会保留 URL 和 token，但禁用全部外部连接、清除当前选择和 Provider 委托。每次启动后都需要用户显式执行测试或连接操作。
 
-开发环境下，默认从仓库根目录运行：
+### URL Policy
+
+- 远程地址必须使用 `https://`，WebSocket 自动使用 `wss://`。
+- 仅明确输入的 `http://localhost`、`http://127.0.0.1` 或 `http://[::1]` 可使用明文 HTTP，对应 WebSocket 为 `ws://`。
+- 其他 HTTP 地址、非 HTTP(S) scheme、缺少 host 的 URL，以及含 user-info 或 query 参数的 URL会被拒绝。不要把 token 放进 URL。
+- 客户端不跟随 HTTP redirect，不扫描端口、不广播发现服务，也不修改 Runtime 的 TLS、CORS、防火墙或监听配置。
+
+### Runtime Token
+
+非空 Runtime token 以 `Authorization: Bearer <token>` 同时附加到 HTTP 和 WebSocket 握手；空 token 不发送认证头。token 保存在本地设置并进入完整 `.jovarchive`，因此两者都必须视为敏感凭据。客户端错误只映射为认证失败、拒绝、资源限制或请求失败等类别，不应回显响应中的秘密。
+
+### Provider Delegation
+
+模型 profile 仅保留用于向用户明确选择的 GensokyoAI Runtime 委托配置；HakureiTerminal 永不使用 profile 直接调用 Provider。Runtime 不会因为添加、测试或启用连接而收到 Provider Key。
+
+用户点击“委托当前模型配置”并确认后，连接只记录被委托的 profile ID。当该 profile 仍是当前 active profile 且外部 Agent 执行 `agent.init` 时，HakureiTerminal 才把主模型及 embedding 的 Provider、模型名、Base URL 和 API Key 作为公开 override 发送给指定 Runtime；生成参数也随主模型 override 发送。授权范围是当前 Runtime 实例，直到服务重启、再次初始化或用户撤销委托。撤销只阻止后续初始化继续发送，并不能从已接收数据的外部进程中远程擦除凭据。HakureiTerminal 不向 GensokyoAI 创建或管理持久 Provider profile。
+
+## Data And Archives
+
+Windows 的主要数据位置为 `%APPDATA%/HakureiTerminal/`；无法使用该位置时，开发 fallback 为仓库工作目录中的 `.hakurei_terminal/` 和 `.hakurei_terminal_settings.json`。
+
+- `settings.json` 包含模型 profile、Provider API Key、外部 Runtime URL/token、委托状态、外观、快捷键和用户角色设置。
+- `assistants/` 中的客户端创作内容是非可执行角色草稿；`conversations/` 中的旧本地会话、消息和上下文是惰性遗留数据或一次性展示缓存；`media/` 保存内容寻址媒体。它们都不是 GensokyoAI 执行状态。
+- `logs/` 用于本地 `.log` 文件。数据管理页只统计或删除该目录中的 `.log`，不删除设置或存档。
+- 完整 `.jovarchive` 包含 `settings/settings.json`，因此包含 Provider API Key 和 Runtime token。导出前会显示敏感凭据提示；不要公开分享归档。
+- 导入在本地解析、校验白名单路径和媒体 SHA-256，不联系 Provider 或 Runtime。恢复的外部连接保持禁用，直到用户再次明确操作。
+- `.jovarchive` 不包含 GensokyoAI 服务端权威的完整角色、会话、消息、上下文、记忆、场景、工具、定时器或配置。归档内的旧本地会话和 Runtime 数据保持惰性，不会自动映射或上传；删除本地连接或本地存档不会删除外部 Runtime 上的数据。
+
+更多数据处理信息见 `PRIVACY.md`，安全报告方式见 `SECURITY.md`。
+
+## Features
+
+- 多模型 profile，仅用于明确委托给选定的 GensokyoAI Runtime。
+- 非可执行角色草稿、用户角色、应用设置、媒体和远端展示缓存管理。
+- 主题、自定义色板、字体、全局及会话背景、头像和快捷键。
+- SHA-256 内容寻址媒体库与跨 Windows/Android 的 `.jovarchive` 导入导出。
+- 独立 GensokyoAI Runtime 的外部角色、分页历史、流式 Agent 消息、可恢复事件、语义记忆、场景、主动定时器和图片消息接入。
+- 本地存储与日志统计、安全清理。
+
+客户端版本唯一来源是 `pubspec.yaml` 的 `version` 字段。该版本不代表外部 Runtime 版本；连接测试读取 GensokyoAI 返回的 `package_version` 和协议版本。
+
+## Development
+
+需要 Flutter SDK 和平台工具链。从仓库根目录运行：
 
 ```cmd
-python bridge_main.py --backend-dir backend --root backend
-```
-
-其中：
-
-- `--backend-dir backend` 表示从 `backend/GensokyoAI` 导入内嵌后端。
-- `--root backend` 表示后端运行根目录使用 `backend`，可读取 `backend/pyproject.toml` 作为版本元数据。
-
-Flutter 开发运行时通常不需要手动调用该命令，`PythonBridge` 会启动 bridge；如需显式指定路径，可以设置：
-
-```cmd
-set HAKUREI_PYTHON_ROOT=C:\path\to\HakureiTerminal
-set HAKUREI_PYTHON_EXECUTABLE=C:\path\to\python.exe
-flutter run -d windows
-```
-
-生产打包环境下，应用会使用随 release 一起复制的 Python runtime：
-
-```text
-Release/
-  hakurei_terminal.exe
-  python/
-    bridge_main.py
-    GensokyoAI/
-    characters/
-    config/
-    runtime/
-      python.exe
-```
-
-## 支持的客户端功能
-
-### 前端版本号
-
-前端版本号只属于 Flutter 客户端，不代表 Python 后端版本。
-
-版本唯一来源是 `pubspec.yaml` 中的 `version` 字段，格式为：
-
-```yaml
-version: 0.0.1+1
-```
-
-其中 `0.0.1` 是用户可见语义化版本，`+1` 是构建号。Flutter 构建默认读取该字段；构建不会自动递增版本号或构建号，只有手动修改 `pubspec.yaml` 时前端版本才会变化。
-
-### 后端版本号
-
-后端版本来自内嵌的 GensokyoAI 源码快照。当前 bridge 会在 `runtime.info` 中返回后端 `package_version`。
-
-本项目不自动跟随上游 GensokyoAI 更新；后端升级、替换、二次修改都由 HakureiTerminal 项目手动控制。
-
-### 许可证边界
-
-仓库根目录的 `LICENSE` 适用于 HakureiTerminal 主项目，许可证为 BSD 3-Clause License。
-
-内嵌后端 `backend/GensokyoAI/` 保留 GensokyoAI 的 MIT License。分发源码或二进制包时，应同时保留根项目 BSD 3-Clause License 与 `THIRD_PARTY_LICENSES.md` 中的 GensokyoAI MIT License 声明。
-
-### 多模型配置
-
-设置页支持维护多套模型配置档案：
-
-- 新建配置。
-- 复制当前配置。
-- 删除配置。
-- 选择当前配置。
-- 编辑主聊天模型。
-- 编辑 embedding 模型。
-- 保存后重新初始化当前角色。
-
-这些配置属于客户端用户设置。保存后，客户端只把当前 active profile 转成 Runtime 初始化所需的标准 JSON 参数传给 Python 后端。
-
-### Provider 依赖检查与安装
-
-Provider SDK 是 Python 后端的可选依赖。HakureiTerminal 只负责触发后端能力，不直接执行 pip 命令。
-
-客户端调用：
-
-- `dependency.status`
-- `dependency.install`
-
-客户端只传 Provider 名称：
-
-```json
-{"providers":["openai","deepseek"]}
-```
-
-后端根据白名单决定需要安装的 Python 包。
-
-安装策略在设置页中配置：
-
-- `auto`：启动或角色初始化时自动安装缺失依赖。
-- `ask`：发现缺失依赖时弹窗确认。
-- `manual`：只提示缺失依赖，由用户在设置页手动触发安装。
-
-### 设置存储
-
-当前设置文件：
-
-```text
-Windows: %APPDATA%/HakureiTerminal/settings.json
-fallback: .hakurei_terminal_settings.json
-```
-
-设置内容包括：
-
-- 模型配置档案列表。
-- 当前 active profile。
-- 依赖安装策略。
-
-后续可增加独立客户端 UI 状态存档，例如：
-
-```text
-Windows: %APPDATA%/HakureiTerminal/frontend_state.json
-fallback: .hakurei_terminal_state.json
-```
-
-该前端存档只保存 UI 状态和展示快照，不替代 Python 后端 session/memory。
-
-## 开发运行
-
-准备客户端 Python 资产：
-
-```cmd
-python scripts\prepare_client_python_assets.py
-```
-
-运行 Flutter Windows 客户端：
-
-```cmd
-flutter run -d windows
-```
-
-## Windows release with bundled CPython
-
-从仓库根目录运行：
-
-```cmd
-python scripts\build_windows_release.py
-```
-
-该命令会：
-
-1. 从 `backend/GensokyoAI` 复制内嵌 Python 后端源码到 `assets/python/GensokyoAI`。
-2. 复制 `bridge_main.py`、`characters/`、`config/` 和 `requirements.txt` 到 `assets/python`。
-3. 下载官方 Windows embeddable CPython 包。
-4. 为嵌入式 runtime 启用 `import site`。
-5. bootstrap pip，并安装 `requirements.txt` 中的核心依赖。
-6. 构建 Flutter Windows release。
-7. 将完整 Python bundle 复制到 `build/windows/x64/runner/Release/python`。
-
-Release 应用会从自身目录启动：
-
-```text
-python/runtime/python.exe
-```
-
-因此不需要系统 Python。
-
-## 目录说明
-
-```text
-lib/
-  main.dart                         # Flutter UI 入口
-  models/app_settings.dart          # 模型配置档案与依赖策略
-  repositories/chat_repository.dart # Runtime RPC 调用封装
-  screens/settings_screen.dart      # 设置页
-  services/python_bridge.dart       # JSON Lines 子进程桥接
-  services/settings_store.dart      # 客户端设置存储
-backend/
-  GensokyoAI/                       # 内嵌后端源码快照
-  pyproject.toml                    # 后端版本元数据
-characters/                         # 随包默认角色资产
-config/                             # 随包默认配置资产
-scripts/                            # 打包与 runtime 准备脚本
-windows/                            # Windows 桌面壳
-linux/                              # Linux 桌面壳
-test/                               # Flutter 测试
-```
-
-## 验证
-
-运行 Flutter 静态检查：
-
-```cmd
+flutter pub get
 flutter analyze
-```
-
-运行 Flutter 测试：
-
-```cmd
 flutter test
 ```
 
-验证 Python bridge：
+运行 Runtime 边界 scanner 及其测试：
 
 ```cmd
-python bridge_main.py --backend-dir backend --root backend
+python -m unittest -v test_scan_forbidden_runtime_assets.py
+python scripts/scan_forbidden_runtime_assets.py source .
 ```
+
+扫描已构建的目录、ZIP 或 APK：
+
+```cmd
+python scripts/scan_forbidden_runtime_assets.py artifact build\windows\x64\runner\Release
+python scripts/scan_forbidden_runtime_assets.py artifact build\app\outputs\flutter-apk\app-release.apk
+```
+
+Scanner 拒绝 GensokyoAI package/wheel/metadata、旧 bridge 文件、Python runtime 布局、第三方角色/场景和旧默认配置进入受检源码或产物。
+
+### Windows
+
+安装 Visual Studio 的 Desktop development with C++ workload 后可运行：
+
+```cmd
+dev_windows.cmd
+flutter build windows --release
+```
+
+`dev_windows.cmd` 只执行 `flutter run -d windows`。Release 输出位于 `build\windows\x64\runner\Release\`，不需要系统 Python，也不包含 Python runtime。
+
+### Android
+
+安装 Android SDK 和 JDK 17 后运行：
+
+```cmd
+flutter build apk --debug
+flutter build apk --release
+```
+
+调试 APK 位于 `build\app\outputs\flutter-apk\app-debug.apk`。应用 namespace 为 `com.hakureiterminal.hakurei_terminal`。正式发布前须使用项目专用 keystore 配置 release 签名；`android/key.properties` 不应提交。Android 导出默认写入应用外部 files 目录，导入通过系统文件选择器完成。
+
+## License And Contributions
+
+HakureiTerminal 使用 Apache License 2.0。外部互操作软件与 bundled font 的说明见 `THIRD_PARTY_LICENSES.md`。
+
+贡献前请阅读 `CONTRIBUTING.md` 和 `DCO.md`，不要提交 API Key、token、Cookie、密码、个人存档、生产配置、第三方 Runtime 源码或无权公开的素材。建议使用 `git commit -s` 签署 DCO。GensokyoAI 本体的修改应提交到其上游项目，而不是本仓库。
