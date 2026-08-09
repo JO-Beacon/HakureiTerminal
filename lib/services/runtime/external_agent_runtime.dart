@@ -51,6 +51,10 @@ abstract interface class ExternalAgentRuntime {
   Future<Map<String, dynamic>> cancelInitiativeTimer({String? timerId});
   Future<Map<String, dynamic>> triggerInitiativeTimer({String? timerId});
   Future<Map<String, dynamic>> externalToolStatus({bool includeTools = true});
+  Future<Map<String, dynamic>> worldState();
+  Future<List<Map<String, dynamic>>> worldRoster();
+  Future<List<Map<String, dynamic>>> worldTranscript({int limit = 100});
+  Future<List<Map<String, dynamic>>> listWorldSessions();
   Future<Map<String, dynamic>> uploadCharacterPackage({
     required String filename,
     required List<int> bytes,
@@ -246,6 +250,25 @@ class GensokyoAiHttpRuntimeFacade implements ExternalAgentRuntime {
       _mapCall('external_tool.status', <String, dynamic>{
         'include_tools': includeTools,
       });
+
+  @override
+  Future<Map<String, dynamic>> worldState() => _mapCall('world.state');
+
+  @override
+  Future<List<Map<String, dynamic>>> worldRoster() =>
+      _listCall('world.roster', resultKey: 'roster');
+
+  @override
+  Future<List<Map<String, dynamic>>> worldTranscript({int limit = 100}) =>
+      _listCall(
+        'world.transcript',
+        params: <String, dynamic>{'limit': limit.clamp(1, 500)},
+        resultKey: 'entries',
+      );
+
+  @override
+  Future<List<Map<String, dynamic>>> listWorldSessions() =>
+      _listCall('world.session.list', resultKey: 'sessions');
 
   @override
   Future<Map<String, dynamic>> uploadCharacterPackage({

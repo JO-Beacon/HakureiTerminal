@@ -10,7 +10,7 @@
 - GensokyoAI `2026.8.8.0` 是独立部署的唯一执行、会话、消息和上下文权威；HakureiTerminal 仅是其专用网络前端。许可证说明见 `THIRD_PARTY_LICENSES.md`。
 - 本仓库默认不接受 GensokyoAI 本体源码修改；相关贡献应提交到 GensokyoAI 上游项目。
 - 不得通过依赖、生成脚本、Flutter/Android assets、安装器或构建步骤把 GensokyoAI 本体、角色、场景、配置、文档、品牌素材、Python runtime 或 bridge 预置到 HakureiTerminal 源码和默认分发包。允许提交的互操作代码只能依赖文档化的公开网络契约。
-- 不得增加本地聊天运行时、直接 Provider 调用、本地权威会话/消息/上下文或断线执行 fallback。断线客户端只能管理配置、非可执行角色草稿和一次性展示缓存，不能聊天。
+- 不得增加本地聊天运行时、直接文本模型 Provider 执行、本地权威会话/消息/上下文或断线执行 fallback。断线客户端只能管理配置、非可执行角色草稿和一次性展示缓存，不能聊天。独立 TTS Provider 只可用于明确触发的客户端媒体功能，不得成为文本生成 fallback。
 - 角色草稿的编辑、导入、恢复和应用启动不得联网或上传。当前不接受角色上传实现；未来只有存在文档化公开网络 API，并提供明确目标连接和 payload 范围确认时才可设计。
 
 ## Issue 内容建议

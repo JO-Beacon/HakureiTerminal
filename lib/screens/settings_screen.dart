@@ -30,6 +30,7 @@ enum SettingsInitialPage {
   language,
   display,
   modelProvider,
+  tts,
   sessionDefaults,
   userProfile,
   assistantManagement,
@@ -216,6 +217,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _embeddingApiKeyController;
   late final TextEditingController _embeddingDimensionsController;
   late final TextEditingController _embeddingTimeoutController;
+  late final TextEditingController _ttsBaseUrlController;
+  late final TextEditingController _ttsApiKeyController;
+  late final TextEditingController _ttsModelController;
+  late final TextEditingController _ttsVoiceController;
   late final TextEditingController _userNicknameController;
   late final TextEditingController _userBioController;
   late final TextEditingController _backgroundImageOpacityController;
@@ -236,6 +241,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, dynamic> _gensokyoToolStatus = const <String, dynamic>{};
   List<Map<String, dynamic>> _gensokyoMemories = const <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _gensokyoScenes = const <Map<String, dynamic>>[];
+  Map<String, dynamic> _gensokyoWorldState = const <String, dynamic>{};
+  List<Map<String, dynamic>> _gensokyoWorldRoster =
+      const <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _gensokyoWorldTranscript =
+      const <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _gensokyoWorldSessions =
+      const <Map<String, dynamic>>[];
   bool _gensokyoSettingsLoading = false;
   bool _gensokyoSettingsBusy = false;
   String? _gensokyoSettingsError;
@@ -251,6 +263,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _embeddingUseProxy;
   bool _obscureApiKey = true;
   bool _obscureEmbeddingApiKey = true;
+  bool _obscureTtsApiKey = true;
+  late bool _ttsEnabled;
+  late double _ttsSpeed;
+  late String _ttsResponseFormat;
   late bool _externalBackendAvailable;
   String? _runtimeConnectionOperationId;
   String _previewLanguage = '简体中文';
@@ -346,6 +362,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _embeddingApiKeyController = TextEditingController();
     _embeddingDimensionsController = TextEditingController();
     _embeddingTimeoutController = TextEditingController();
+    _ttsBaseUrlController = TextEditingController(text: _settings.tts.baseUrl);
+    _ttsApiKeyController = TextEditingController(text: _settings.tts.apiKey);
+    _ttsModelController = TextEditingController(text: _settings.tts.model);
+    _ttsVoiceController = TextEditingController(text: _settings.tts.voice);
+    _ttsEnabled = _settings.tts.enabled;
+    _ttsSpeed = _settings.tts.speed;
+    _ttsResponseFormat = _settings.tts.responseFormat;
     _userNicknameController = TextEditingController();
     _userBioController = TextEditingController();
     _gensokyoMemorySearchController = TextEditingController();
@@ -383,6 +406,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _embeddingApiKeyController,
       _embeddingDimensionsController,
       _embeddingTimeoutController,
+      _ttsBaseUrlController,
+      _ttsApiKeyController,
+      _ttsModelController,
+      _ttsVoiceController,
     ]) {
       controller.addListener(_scheduleSettingsChanged);
     }
@@ -410,6 +437,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _embeddingApiKeyController.dispose();
     _embeddingDimensionsController.dispose();
     _embeddingTimeoutController.dispose();
+    _ttsBaseUrlController.dispose();
+    _ttsApiKeyController.dispose();
+    _ttsModelController.dispose();
+    _ttsVoiceController.dispose();
     _userNicknameController.dispose();
     _userBioController.dispose();
     _gensokyoMemorySearchController.dispose();
@@ -658,6 +689,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             _buildSettingsListTile(
               themedContext,
+              page: _SettingsPage.tts,
+              icon: Icons.record_voice_over_outlined,
+              title: 'TTS 语音',
+              subtitle: '专用语音 Provider 与播放设置',
+              showSelection: !fullWidth,
+            ),
+            _buildSettingsListTile(
+              themedContext,
               page: _SettingsPage.sessionDefaults,
               icon: Icons.playlist_add_check_outlined,
               title: '会话默认值',
@@ -778,6 +817,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return _buildDisplayPage();
       case _SettingsPage.modelProvider:
         return _buildModelProviderPage();
+      case _SettingsPage.tts:
+        return _buildTtsPage();
       case _SettingsPage.sessionDefaults:
         return _buildSessionDefaultsPage();
       case _SettingsPage.userProfile:
@@ -826,6 +867,128 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   setState(() => _previewLanguage = value);
                 }
               },
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTtsPage() {
+    return ListView(
+      key: const ValueKey<String>('ttsSettingsPage'),
+      padding: const EdgeInsets.all(10),
+      children: <Widget>[
+        _SettingsSection(
+          icon: Icons.record_voice_over_outlined,
+          title: 'TTS Provider',
+          description: '使用兼容 OpenAI /audio/speech 的专用语音服务。仅在点击消息朗读时请求，不参与聊天生成。',
+          children: <Widget>[
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('启用消息朗读'),
+              subtitle: const Text('关闭时聊天页不显示朗读按钮'),
+              value: _ttsEnabled,
+              onChanged: (value) {
+                setState(() => _ttsEnabled = value);
+                _notifySettingsChanged();
+              },
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              key: const ValueKey<String>('ttsBaseUrlField'),
+              controller: _ttsBaseUrlController,
+              enabled: _ttsEnabled,
+              decoration: const InputDecoration(
+                labelText: 'Base URL',
+                hintText: 'https://example.com/v1',
+                helperText: '也可直接填写以 /audio/speech 结尾的地址',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey<String>('ttsApiKeyField'),
+              controller: _ttsApiKeyController,
+              enabled: _ttsEnabled,
+              obscureText: _obscureTtsApiKey,
+              decoration: InputDecoration(
+                labelText: 'API Key（可选）',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  tooltip: _obscureTtsApiKey ? '显示 API Key' : '隐藏 API Key',
+                  onPressed: () =>
+                      setState(() => _obscureTtsApiKey = !_obscureTtsApiKey),
+                  icon: Icon(
+                    _obscureTtsApiKey ? Icons.visibility : Icons.visibility_off,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    key: const ValueKey<String>('ttsModelField'),
+                    controller: _ttsModelController,
+                    enabled: _ttsEnabled,
+                    decoration: const InputDecoration(
+                      labelText: '模型',
+                      hintText: 'tts-1',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    key: const ValueKey<String>('ttsVoiceField'),
+                    controller: _ttsVoiceController,
+                    enabled: _ttsEnabled,
+                    decoration: const InputDecoration(
+                      labelText: '音色',
+                      hintText: 'alloy',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Text('语速 ${_ttsSpeed.toStringAsFixed(2)}x'),
+            Slider(
+              value: _ttsSpeed.clamp(0.25, 4.0),
+              min: 0.25,
+              max: 4,
+              divisions: 15,
+              onChanged: _ttsEnabled
+                  ? (value) {
+                      setState(() => _ttsSpeed = value);
+                      _notifySettingsChanged();
+                    }
+                  : null,
+            ),
+            DropdownButtonFormField<String>(
+              initialValue: _ttsResponseFormat,
+              decoration: const InputDecoration(
+                labelText: '音频格式',
+                border: OutlineInputBorder(),
+              ),
+              items: const <DropdownMenuItem<String>>[
+                DropdownMenuItem(value: 'mp3', child: Text('MP3')),
+                DropdownMenuItem(value: 'wav', child: Text('WAV')),
+                DropdownMenuItem(value: 'opus', child: Text('Opus')),
+                DropdownMenuItem(value: 'aac', child: Text('AAC')),
+                DropdownMenuItem(value: 'flac', child: Text('FLAC')),
+              ],
+              onChanged: _ttsEnabled
+                  ? (value) {
+                      if (value == null) return;
+                      setState(() => _ttsResponseFormat = value);
+                      _notifySettingsChanged();
+                    }
+                  : null,
             ),
           ],
         ),
@@ -1984,6 +2147,121 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
         ),
+        const SizedBox(height: 20),
+        _buildWorldSection(capabilities),
+      ],
+    );
+  }
+
+  Widget _buildWorldSection(List<String> capabilities) {
+    final available = capabilities.contains('world.orchestration');
+    if (!available) {
+      return const _SettingsSection(
+        icon: Icons.public_outlined,
+        title: 'GensokyoWorld',
+        description: '多角色 World 编排的只读状态。',
+        children: <Widget>[
+          _SettingsInfoTile(
+            icon: Icons.extension_off_outlined,
+            title: 'Runtime 未提供 World 能力',
+            description: '当前服务没有声明 world.orchestration；普通 Agent 聊天不受影响。',
+          ),
+        ],
+      );
+    }
+    final worldId = _gensokyoWorldState['world_id']?.toString() ?? '';
+    final sessionId = _gensokyoWorldState['session_id']?.toString() ?? '';
+    return _SettingsSection(
+      icon: Icons.public_outlined,
+      title: 'GensokyoWorld',
+      description: '查看 Runtime 权威的 World、花名册、共享剧本和存档；客户端不在此执行写操作。',
+      children: <Widget>[
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            const Chip(
+              avatar: Icon(Icons.visibility_outlined, size: 18),
+              label: Text('只读'),
+            ),
+            Chip(label: Text(worldId.isEmpty ? 'World 未装配' : worldId)),
+            if (_gensokyoWorldState['started'] == true)
+              const Chip(label: Text('已开始')),
+            if (_gensokyoWorldState['waiting_for_user'] == true)
+              const Chip(label: Text('等待用户')),
+          ],
+        ),
+        if (sessionId.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 8),
+          _buildBackendInfoTile('World 会话', sessionId, selectable: true),
+        ],
+        const Divider(height: 28),
+        Text('花名册', style: Theme.of(context).textTheme.titleMedium),
+        if (_gensokyoWorldRoster.isEmpty)
+          const _SettingsInfoTile(
+            icon: Icons.groups_outlined,
+            title: '暂无在场角色',
+            description: 'Runtime 当前没有返回 World 花名册。',
+          )
+        else
+          for (final actor in _gensokyoWorldRoster)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                actor['is_current'] == true
+                    ? Icons.record_voice_over_outlined
+                    : Icons.person_outline,
+              ),
+              title: Text(
+                actor['name']?.toString() ??
+                    actor['actor_id']?.toString() ??
+                    '未命名角色',
+              ),
+              subtitle: Text('场景：${actor['scene_id'] ?? '未指定'}'),
+            ),
+        const Divider(height: 28),
+        Text('共享剧本', style: Theme.of(context).textTheme.titleMedium),
+        if (_gensokyoWorldTranscript.isEmpty)
+          const _SettingsInfoTile(
+            icon: Icons.article_outlined,
+            title: '暂无公开剧本',
+            description: '当前场景没有可显示的共享剧本条目。',
+          )
+        else
+          for (final entry in _gensokyoWorldTranscript)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.chat_bubble_outline),
+              title: Text(
+                entry['speaker_name']?.toString() ??
+                    entry['actor_name']?.toString() ??
+                    entry['speaker_id']?.toString() ??
+                    entry['speaker_kind']?.toString() ??
+                    'World',
+              ),
+              subtitle: SelectableText(
+                contextMenuBuilder: jovTextContextMenu,
+                entry['content']?.toString() ?? '',
+              ),
+            ),
+        const Divider(height: 28),
+        Text('World 存档', style: Theme.of(context).textTheme.titleMedium),
+        if (_gensokyoWorldSessions.isEmpty)
+          const Text('暂无可显示的 World 存档')
+        else
+          for (final session in _gensokyoWorldSessions)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.inventory_2_outlined),
+              title: Text(
+                session['title']?.toString() ??
+                    session['session_id']?.toString() ??
+                    '未命名存档',
+              ),
+              subtitle: Text(
+                '会话 ${session['session_id'] ?? ''}${session['updated_at'] == null ? '' : ' · ${session['updated_at']}'}',
+              ),
+            ),
       ],
     );
   }
@@ -2091,6 +2369,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
       runtime.listSessions,
       errors,
     );
+    final worldAvailable =
+        (info?['capabilities'] as List?)?.any(
+          (item) => item.toString() == 'world.orchestration',
+        ) ==
+        true;
+    Map<String, dynamic>? worldState;
+    List<Map<String, dynamic>>? worldRoster;
+    List<Map<String, dynamic>>? worldTranscript;
+    List<Map<String, dynamic>>? worldSessions;
+    if (worldAvailable) {
+      worldState = await _readGensokyoRuntime(
+        'World 状态',
+        runtime.worldState,
+        errors,
+        optional: true,
+      );
+      if (worldState != null && worldState.isNotEmpty) {
+        worldRoster = await _readGensokyoRuntime(
+          'World 花名册',
+          runtime.worldRoster,
+          errors,
+          optional: true,
+        );
+        worldTranscript = await _readGensokyoRuntime(
+          'World 共享剧本',
+          runtime.worldTranscript,
+          errors,
+          optional: true,
+        );
+        worldSessions = await _readGensokyoRuntime(
+          'World 存档',
+          runtime.listWorldSessions,
+          errors,
+          optional: true,
+        );
+      }
+    }
     Map<String, dynamic>? session;
     Map<String, dynamic>? timer;
     Map<String, dynamic>? currentScene;
@@ -2143,6 +2458,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _gensokyoMemories = memories ?? const <Map<String, dynamic>>[];
       _gensokyoScenes = scenes ?? const <Map<String, dynamic>>[];
       _gensokyoCurrentScene = currentScene ?? const <String, dynamic>{};
+      _gensokyoWorldState = worldState ?? const <String, dynamic>{};
+      _gensokyoWorldRoster = worldRoster ?? const <Map<String, dynamic>>[];
+      _gensokyoWorldTranscript =
+          worldTranscript ?? const <Map<String, dynamic>>[];
+      _gensokyoWorldSessions = worldSessions ?? const <Map<String, dynamic>>[];
       _gensokyoSettingsError = errors.isEmpty ? null : errors.join('\n');
       _gensokyoSettingsLoading = false;
     });
@@ -4634,7 +4954,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           children: const <Widget>[
             SelectableText(
               contextMenuBuilder: jovTextContextMenu,
-              'Dart 依赖：package_info_plus、archive、crypto、cupertino_icons。',
+              'Dart 依赖：package_info_plus、archive、crypto、cupertino_icons、flutter_markdown_plus、audioplayers、url_launcher。',
             ),
             SizedBox(height: 8),
             SelectableText(
@@ -5415,6 +5735,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return _settings
         .copyWith(
           appearance: appearance,
+          tts: TtsSettings(
+            enabled: _ttsEnabled,
+            baseUrl: _ttsBaseUrlController.text.trim(),
+            apiKey: _ttsApiKeyController.text.trim(),
+            model: _ttsModelController.text.trim(),
+            voice: _ttsVoiceController.text.trim(),
+            speed: _ttsSpeed,
+            responseFormat: _ttsResponseFormat,
+          ),
           activeUserRoleId: _selectedUserRoleId,
           newSessionTitleMode: _previewDefaultTitleMode,
           userRoles: _userRoles
@@ -5606,6 +5935,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return '显示设置';
       case _SettingsPage.modelProvider:
         return 'Provider 委托档案';
+      case _SettingsPage.tts:
+        return 'TTS 语音';
       case _SettingsPage.sessionDefaults:
         return '会话默认值';
       case _SettingsPage.userProfile:
@@ -5635,6 +5966,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return _SettingsPage.display;
       case SettingsInitialPage.modelProvider:
         return _SettingsPage.modelProvider;
+      case SettingsInitialPage.tts:
+        return _SettingsPage.tts;
       case SettingsInitialPage.sessionDefaults:
         return _SettingsPage.sessionDefaults;
       case SettingsInitialPage.userProfile:
@@ -5661,6 +5994,7 @@ enum _SettingsPage {
   language,
   display,
   modelProvider,
+  tts,
   sessionDefaults,
   userProfile,
   assistantManagement,

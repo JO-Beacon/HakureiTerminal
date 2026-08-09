@@ -11,6 +11,7 @@ On Windows, the normal data root is `%APPDATA%/HakureiTerminal/`. Development or
 `settings.json` can contain secrets in plaintext application data:
 
 - Model Provider API keys and Provider base URLs.
+- Dedicated TTS Provider API keys, base URLs, model, voice, and playback settings.
 - GensokyoAI Runtime URLs and bearer tokens.
 - The identity of a model profile delegated to a Runtime connection.
 
@@ -18,7 +19,7 @@ Protect the device account, backups, and filesystem permissions accordingly.
 
 ## Network Transmissions
 
-HakureiTerminal has no first-party chat runtime and never calls a model Provider for generation, embeddings, tools, or context processing. After an explicit user action, it may read a configured Provider's model list or model metadata to populate the settings UI. Model profiles are also retained so the user can explicitly delegate selected settings to a selected GensokyoAI Runtime; the Runtime and Provider operators control their own processing and retention.
+HakureiTerminal has no first-party chat runtime and never calls a text-model Provider for chat generation, embeddings, tools, or context processing. After an explicit user action, it may read a configured Provider's model list or model metadata to populate the settings UI. Model profiles are also retained so the user can explicitly delegate selected settings to a selected GensokyoAI Runtime. A separately configured TTS Provider receives Markdown-derived readable assistant text only when the user clicks a read-aloud action; code blocks are excluded, and returned audio is stored only in the temporary directory for client playback. Runtime and Provider operators control their own processing and retention.
 
 For an explicitly connected external GensokyoAI connection, HakureiTerminal may send:
 
@@ -27,6 +28,7 @@ For an explicitly connected external GensokyoAI connection, HakureiTerminal may 
 - Messages submitted to external sessions and identifiers needed to resume those sessions.
 - A model and embedding profile, including Provider API keys, only after explicit Provider delegation and only during `agent.init` for the designated connection.
 - A character package only after an explicit upload confirmation, to the selected Runtime's documented public package endpoint.
+- Read-only World state, roster, public transcript, and archive-list requests when the Runtime declares `world.orchestration`.
 
 GensokyoAI owns and may persist its native characters, sessions, messages, memory, scenes, tools, timers, and operational logs. HakureiTerminal may keep remote IDs and read-only display snapshots, but those are not authoritative copies of external history. Review the external operator's privacy and retention policy before connecting.
 

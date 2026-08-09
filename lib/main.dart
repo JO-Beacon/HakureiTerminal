@@ -5,6 +5,7 @@ import 'dart:ui' show PointerDeviceKind;
 import 'dart:ui' as ui show instantiateImageCodec;
 
 import 'package:file_selector/file_selector.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -25,12 +26,14 @@ import 'services/runtime/http_runtime_client.dart';
 import 'services/runtime/runtime_connection.dart';
 import 'services/runtime/runtime_conversation_controller.dart';
 import 'services/settings_store.dart';
+import 'services/tts_service.dart';
 import 'theme/app_theme.dart';
 import 'widgets/text_context_menu.dart';
 import 'widgets/top_notice.dart';
 import 'widgets/app_background.dart';
 import 'widgets/avatar_editor_dialog.dart';
 import 'widgets/avatar_image.dart';
+import 'widgets/markdown_message.dart';
 
 @visibleForTesting
 bool isNearScrollBottom({
@@ -38,6 +41,10 @@ bool isNearScrollBottom({
   required double maxScrollExtent,
   double threshold = 80,
 }) => maxScrollExtent - pixels <= threshold;
+
+@visibleForTesting
+bool shouldClearTtsMessage({required PlayerState state, required bool busy}) =>
+    !busy && (state == PlayerState.completed || state == PlayerState.stopped);
 
 @visibleForTesting
 String? formatSettingsOperationNotice({
@@ -508,6 +515,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Object? _sessionMetadataRefreshToken;
   Future<void>? _sessionMetadataRefreshFuture;
   Future<void> _liveSettingsWrites = Future<void>.value();
+  late final TtsService _ttsService;
+  StreamSubscription<PlayerState>? _ttsStateSubscription;
+  PlayerState _ttsPlayerState = PlayerState.stopped;
+  String? _ttsMessageId;
+  bool _ttsBusy = false;
 
   static const double _minPaneWidth = 220;
   static const double _minChatPaneWidth = 360;
@@ -568,6 +580,17 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _settings = widget.initialSettings;
+    _ttsService = TtsService();
+    _ttsStateSubscription = _ttsService.states.listen((state) {
+      if (!mounted) return;
+      setState(() {
+        _ttsPlayerState = state;
+        if (shouldClearTtsMessage(state: state, busy: _ttsBusy)) {
+          _ttsBusy = false;
+          _ttsMessageId = null;
+        }
+      });
+    });
     FocusManager.instance.addEarlyKeyEventHandler(_handleComposerKeyEvent);
     _externalBackendAvailable = widget.initialExternalBackendAvailable;
     _assistants = const <Assistant>[];
@@ -595,11 +618,61 @@ class _ChatScreenState extends State<ChatScreen> {
     widget.controller?._detach(this);
     FocusManager.instance.removeEarlyKeyEventHandler(_handleComposerKeyEvent);
     unawaited(_disposeRuntimeController());
+    unawaited(_ttsStateSubscription?.cancel());
+    unawaited(_ttsService.dispose());
     _messageController.dispose();
     _messageFocusNode.dispose();
     _scrollController.dispose();
     _composerActionsScrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _speakMessage(ChatMessage message) async {
+    if (_ttsBusy) return;
+    final text = markdownToSpeechText(
+      message.contentParts.isEmpty
+          ? message.content
+          : message.contentParts
+                .where((part) => part.type == 'text')
+                .map((part) => part.text)
+                .join('\n'),
+    );
+    setState(() {
+      _ttsBusy = true;
+      _ttsMessageId = message.id;
+      _error = null;
+    });
+    try {
+      await _ttsService.stop();
+      await _ttsService.speak(text, _settings.tts);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = '语音生成失败：$error';
+          _ttsMessageId = null;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _ttsBusy = false);
+    }
+  }
+
+  Future<void> _toggleTtsPlayback() async {
+    if (_ttsPlayerState == PlayerState.paused) {
+      await _ttsService.resume();
+    } else {
+      await _ttsService.pause();
+    }
+  }
+
+  Future<void> _stopTts() async {
+    await _ttsService.stop();
+    if (mounted) {
+      setState(() {
+        _ttsMessageId = null;
+        _ttsBusy = false;
+      });
+    }
   }
 
   Future<void> _loadSettingsAndSessions() async {
@@ -2726,6 +2799,13 @@ class _ChatScreenState extends State<ChatScreen> {
                         bubbleStyle: _settings.appearance.bubbleStyle,
                         cornerRadius: _settings.appearance.cornerRadius,
                         excludedFromContext: false,
+                        ttsConfigured: _settings.tts.isConfigured,
+                        ttsActive: _ttsMessageId == message.id,
+                        ttsPaused: _ttsPlayerState == PlayerState.paused,
+                        ttsBusy: _ttsBusy && _ttsMessageId == message.id,
+                        onSpeak: () => _speakMessage(message),
+                        onToggleTts: _toggleTtsPlayback,
+                        onStopTts: _stopTts,
                       );
                     },
                   ),
@@ -3831,6 +3911,13 @@ class _MessageBubble extends StatelessWidget {
     required this.bubbleStyle,
     required this.cornerRadius,
     this.excludedFromContext = false,
+    this.ttsConfigured = false,
+    this.ttsActive = false,
+    this.ttsPaused = false,
+    this.ttsBusy = false,
+    this.onSpeak,
+    this.onToggleTts,
+    this.onStopTts,
   });
 
   final ChatMessage message;
@@ -3839,6 +3926,13 @@ class _MessageBubble extends StatelessWidget {
   final String bubbleStyle;
   final double cornerRadius;
   final bool excludedFromContext;
+  final bool ttsConfigured;
+  final bool ttsActive;
+  final bool ttsPaused;
+  final bool ttsBusy;
+  final VoidCallback? onSpeak;
+  final VoidCallback? onToggleTts;
+  final VoidCallback? onStopTts;
 
   @override
   Widget build(BuildContext context) {
@@ -3910,6 +4004,43 @@ class _MessageBubble extends StatelessWidget {
               ),
             ),
           bubble,
+          if (message.role == ChatMessageRole.assistant &&
+              ttsConfigured &&
+              _hasSpeechText)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  if (!ttsActive)
+                    IconButton(
+                      tooltip: '朗读消息',
+                      onPressed: ttsBusy ? null : onSpeak,
+                      icon: const Icon(Icons.volume_up_outlined, size: 18),
+                    )
+                  else ...<Widget>[
+                    IconButton(
+                      tooltip: ttsPaused ? '继续朗读' : '暂停朗读',
+                      onPressed: ttsBusy ? null : onToggleTts,
+                      icon: Icon(
+                        ttsPaused ? Icons.play_arrow : Icons.pause,
+                        size: 18,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '停止朗读',
+                      onPressed: onStopTts,
+                      icon: const Icon(Icons.stop, size: 18),
+                    ),
+                    if (ttsBusy)
+                      const SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                  ],
+                ],
+              ),
+            ),
           if (!isUser) ...<Widget>[
             const SizedBox(height: 2),
             Padding(
@@ -3951,6 +4082,12 @@ class _MessageBubble extends StatelessWidget {
       _ => assistantName,
     };
   }
+
+  bool get _hasSpeechText =>
+      message.content.trim().isNotEmpty ||
+      message.contentParts.any(
+        (part) => part.type == 'text' && part.text.trim().isNotEmpty,
+      );
 }
 
 class _StructuredMessageBody extends StatelessWidget {
@@ -3973,7 +4110,7 @@ class _StructuredMessageBody extends StatelessWidget {
               message.toolEvents.isNotEmpty))
         const SizedBox(height: 8),
       if (message.contentParts.isEmpty && message.content.isNotEmpty)
-        SelectableText(contextMenuBuilder: jovTextContextMenu, message.content),
+        MarkdownMessage(data: message.content),
       if (message.contentParts.isNotEmpty)
         for (final (index, part) in message.contentParts.indexed) ...<Widget>[
           if (index > 0) const SizedBox(height: 8),
@@ -4055,7 +4192,7 @@ class _ContentPartView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (part.type == 'text' && part.text.isNotEmpty) {
-      return SelectableText(contextMenuBuilder: jovTextContextMenu, part.text);
+      return MarkdownMessage(data: part.text);
     }
     if (part.type == 'image') {
       return _RuntimeImage(image: part.image);

@@ -1,6 +1,6 @@
 # HakureiTerminal
 
-HakureiTerminal 是独立部署的 GensokyoAI Agent v2 Runtime 的专用 Flutter 前端。GensokyoAI 是可执行角色、聊天会话、消息、上下文、记忆、场景、工具、定时器和生成状态的唯一权威；HakureiTerminal 不包含聊天运行时，也不直接调用模型 Provider 执行生成、Embedding 或工具。用户明确操作时，客户端可直接读取用户配置 Provider 的模型列表和模型元数据。客户端只支持 Runtime 协议主版本 `2`，不兼容 v1，也不接入 `world.*`。
+HakureiTerminal 是独立部署的 GensokyoAI Agent v2 Runtime 的专用 Flutter 前端。GensokyoAI 是可执行角色、聊天会话、消息、上下文、记忆、场景、World、工具、定时器和生成状态的唯一权威；HakureiTerminal 不包含聊天运行时，也不直接调用文本模型 Provider 执行生成、Embedding 或工具。用户明确操作时，客户端可读取用户配置 Provider 的模型列表和模型元数据，并可使用独立配置的 TTS Provider 朗读助手消息。客户端只支持 Runtime 协议主版本 `2`，不兼容 v1。
 
 ## Downloads
 
@@ -38,7 +38,7 @@ GensokyoAI 必须由用户或运维方在 HakureiTerminal 之外部署、配置 
 
 1. 在“设置 -> 服务管理 -> 外部服务连接”添加显示名称、Runtime 根 URL 和可选 token。保存只写入本地 `settings.json`，不会发起网络请求。
 2. 点击“测试连接”。客户端先以 `POST <base>/rpc` 调用 `runtime.info` 读取版本、方法、传输和流协议，再以 `GET <base>/health` 与 `GET <base>/ready` 检查健康和就绪状态。
-3. 客户端只接受 `protocol_major_version == 2`，并检查 Agent 生命周期、消息状态、会话、角色发现和 WebSocket v2 ack 所需的公开能力；`world.*` 不属于客户端能力范围。
+3. 客户端只接受 `protocol_major_version == 2`，并检查 Agent 生命周期、消息状态、会话、角色发现和 WebSocket v2 ack 所需的公开能力；声明 `world.orchestration` 时可读取公开 World 状态、花名册、共享剧本和存档列表。
 4. 测试成功后，用户仍需对指定连接执行明确的连接操作。连接只建立 `<base>/ws` 并读取本地已知映射；不会自动初始化角色、恢复会话或扫描其他角色的会话。
 5. 每个连接持久化一个客户端生成的 UUID `agent_id`。用户明确选择角色和会话后，客户端以单一串行事务执行 `agent.init`，成功后才用该 `agent_id` 发送 `runtime.subscribe` 并分页读取 Runtime 权威历史及会话 `revision`。
 6. 普通管理 RPC 使用 `POST <base>/rpc`。外部消息使用 WebSocket `agent.send_message_stream`，携带显式 `agent_id`、`session_id`、`expected_revision` 和每次操作唯一的 `idempotency_key`；客户端先消费 v2 ack 中的 `stream_id` / `generation_id`，取消使用 `runtime.cancel_stream`。
@@ -65,11 +65,15 @@ GensokyoAI 必须由用户或运维方在 HakureiTerminal 之外部署、配置 
 
 用户点击“委托当前模型配置”并确认后，连接只记录被委托的 profile ID。当该 profile 仍是当前 active profile 且外部 Agent 执行 `agent.init` 时，HakureiTerminal 才把主模型及 embedding 的 Provider、模型名、Base URL 和 API Key 作为公开 override 发送给指定 Runtime；生成参数也随主模型 override 发送。授权范围是当前 Runtime 实例，直到服务重启、再次初始化或用户撤销委托。撤销只阻止后续初始化继续发送，并不能从已接收数据的外部进程中远程擦除凭据。HakureiTerminal 不向 GensokyoAI 创建或管理持久 Provider profile。
 
+### TTS Provider
+
+开发分支支持用户单独配置兼容 OpenAI `/audio/speech` 的 TTS Provider。只有用户点击助手消息的朗读按钮时，客户端才把从 Markdown 提取的可朗读文本发送给该 Provider；代码块不会发送。生成的音频写入临时目录并由客户端播放，停止或切换朗读时清理。TTS 不修改 Runtime 消息、上下文、记忆或生成状态，也不作为文本生成 fallback。
+
 ## Data And Archives
 
 Windows 的主要数据位置为 `%APPDATA%/HakureiTerminal/`；无法使用该位置时，开发 fallback 为仓库工作目录中的 `.hakurei_terminal/` 和 `.hakurei_terminal_settings.json`。
 
-- `settings.json` 包含模型 profile、Provider API Key、外部 Runtime URL/token、委托状态、外观、快捷键和用户角色设置。
+- `settings.json` 包含模型 profile、文本模型和 TTS Provider API Key、外部 Runtime URL/token、委托状态、外观、快捷键和用户角色设置。
 - `assistants/` 中的客户端创作内容是非可执行角色草稿；`conversations/` 中的旧本地会话、消息和上下文是惰性遗留数据或一次性展示缓存；`media/` 保存内容寻址媒体。它们都不是 GensokyoAI 执行状态。
 - `logs/` 用于本地 `.log` 文件。数据管理页只统计或删除该目录中的 `.log`，不删除设置或存档。
 - 完整 `.jovarchive` 包含 `settings/settings.json`，因此包含 Provider API Key 和 Runtime token。导出前会显示敏感凭据提示；不要公开分享归档。
@@ -85,6 +89,8 @@ Windows 的主要数据位置为 `%APPDATA%/HakureiTerminal/`；无法使用该�
 - 主题、自定义色板、字体、全局及会话背景、头像和快捷键。
 - SHA-256 内容寻址媒体库与跨 Windows/Android 的 `.jovarchive` 导入导出。
 - 独立 GensokyoAI Runtime 的外部角色、分页历史、流式 Agent 消息、可恢复事件、语义记忆、场景、主动定时器和图片消息接入。
+- Markdown 消息渲染、代码块复制和独立 TTS Provider 消息朗读。
+- GensokyoWorld 能力探测及 World 状态、花名册、共享剧本和存档的只读显示。
 - 本地存储与日志统计、安全清理。
 
 客户端版本唯一来源是 `pubspec.yaml` 的 `version` 字段。该版本不代表外部 Runtime 版本；连接测试读取 GensokyoAI 返回的 `package_version` 和协议版本。

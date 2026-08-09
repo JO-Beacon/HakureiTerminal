@@ -8,6 +8,31 @@ import 'package:hakurei_terminal/services/settings_store.dart';
 import 'package:hakurei_terminal/theme/app_theme.dart';
 
 void main() {
+  test('AppSettings persists dedicated TTS provider settings', () {
+    final settings = AppSettings.defaultSettings.copyWith(
+      tts: const TtsSettings(
+        enabled: true,
+        baseUrl: 'https://voice.example/v1',
+        apiKey: 'tts-secret',
+        model: 'voice-model',
+        voice: 'reimu',
+        speed: 1.25,
+        responseFormat: 'wav',
+      ),
+    );
+
+    final restored = AppSettings.fromJson(settings.toJson());
+
+    expect(restored.tts.isConfigured, isTrue);
+    expect(restored.tts.baseUrl, 'https://voice.example/v1');
+    expect(restored.tts.apiKey, 'tts-secret');
+    expect(restored.tts.model, 'voice-model');
+    expect(restored.tts.voice, 'reimu');
+    expect(restored.tts.speed, 1.25);
+    expect(restored.tts.responseFormat, 'wav');
+    expect(AppSettings.fromJson(<String, dynamic>{}).tts.enabled, isFalse);
+  });
+
   test('AppSettings persists the new session title mode', () {
     final settings = AppSettings.defaultSettings.copyWith(
       newSessionTitleMode: SessionTitleMode.firstMessage,

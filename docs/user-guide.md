@@ -7,7 +7,7 @@ HakureiTerminal 只是 GensokyoAI Runtime 的客户端，不包含本地聊天�
 - GensokyoAI Runtime：`2026.8.8.0`
 - Runtime 协议主版本：`2`
 
-客户端不兼容 Runtime v1，也不接入 `world.*`。Runtime 的地址、token、角色、会话、Provider 和服务端数据由用户或运维方负责配置。客户端不会替你安装、启动或修复 Runtime。
+客户端不兼容 Runtime v1。Runtime 的地址、token、角色、会话、World、Provider 和服务端数据由用户或运维方负责配置。客户端不会替你安装、启动或修复 Runtime。
 
 ## 2. 添加并连接 Runtime
 
@@ -26,6 +26,8 @@ HakureiTerminal 只是 GensokyoAI Runtime 的客户端，不包含本地聊天�
 2. 在消息框输入内容并发送。生成过程和最终消息由 GensokyoAI Runtime 负责。
 3. 流式生成期间可以使用取消操作。取消后，重新点击左侧会话列表中的当前会话可重新读取服务端最新状态；顶部刷新按钮只刷新当前页面展示，不会重新建立 Runtime 会话。
 4. 新会话标题可在“设置”中的“新会话标题”选项配置为固定标题、创建时间或首条用户消息。该设置只影响客户端创建会话时使用的标题，不会改变既有会话的服务端历史。
+
+助手消息按 Markdown 渲染，支持标题、强调、列表、引用、链接、表格、行内代码和代码块。代码块右上角提供复制按钮；只有 HTTP/HTTPS 链接可以从客户端打开。Markdown 渲染不会修改 Runtime 保存的原始消息。
 
 ## 4. 图片和媒体
 
@@ -47,19 +49,31 @@ HakureiTerminal 不使用 Provider 生成回复、执行 Embedding、工具调�
 
 如果需要把模型配置交给 Runtime，必须在目标连接上明确执行“委托当前模型配置”并确认。委托会在后续 `agent.init` 时把选定 profile 的配置发送给该 Runtime 实例；它不是持久的服务端 Provider 配置。
 
-## 7. 本地角色草稿与角色包
+## 7. TTS 消息朗读
+
+在“设置 -> TTS 语音”中可以配置兼容 OpenAI `/audio/speech` 的专用 TTS Provider，包括 Base URL、API Key、模型、音色、语速和音频格式。启用并完整配置后，助手消息下方会出现朗读按钮。
+
+只有点击朗读按钮才会向 TTS Provider 发送请求。客户端从 Markdown 提取可朗读文本并排除代码块，音频只保存到临时目录用于播放；暂停、继续、停止或切换消息不会修改 GensokyoAI 的消息、上下文或记忆。远程 TTS 地址必须使用 HTTPS，本机回环地址允许 HTTP。
+
+## 8. GensokyoWorld
+
+如果已连接 Runtime 在 `runtime.info` 中声明 `world.orchestration`，可在“GensokyoAI 设置”底部查看当前 World 状态、花名册、当前场景的共享剧本和 World 存档列表。当前客户端仅执行这些公开只读请求，不在设置页初始化、恢复、移动或删除 World。
+
+World 由 Runtime 管理。未启用或尚未装配 World 时，普通 Agent 聊天不受影响。
+
+## 9. 本地角色草稿与角色包
 
 “角色管理”中的本地角色是不可执行草稿。新建、编辑、导入、恢复或打开草稿都不会联系 Runtime，也不会自动出现在远程角色选择器中。
 
 如果你已有 `.gensokyo-character` 角色包，并且目标 Runtime 启用了公开角色包管理接口和管理员权限，可以在“GensokyoAI 设置”中执行独立上传。上传前会显示目标连接、文件和覆盖选项，必须明确确认；本地草稿不会被隐式转换或上传。
 
-## 8. 存档与数据安全
+## 10. 存档与数据安全
 
-`.jovarchive` 可能包含 Runtime token、Provider API Key、连接 URL、媒体和本地草稿，应当按凭据备份保护，不要公开分享。导入在本地完成，不会联系 Runtime 或 Provider；恢复的外部连接保持断开，直到你再次明确测试或连接。
+`.jovarchive` 可能包含 Runtime token、文本模型和 TTS Provider API Key、连接 URL、媒体和本地草稿，应当按凭据备份保护，不要公开分享。导入在本地完成，不会联系 Runtime 或 Provider；恢复的外部连接保持断开，直到你再次明确测试或连接。
 
 存档不包含 Runtime 服务端权威的完整角色、会话、消息、上下文、记忆、场景、工具、定时器或配置。删除客户端缓存、草稿或连接，不会删除服务端数据。
 
-## 9. 常见问题
+## 11. 常见问题
 
 ### 测试连接失败
 
@@ -76,4 +90,3 @@ HakureiTerminal 不使用 Provider 生成回复、执行 Embedding、工具调�
 ### 服务请求失败
 
 先确认当前会话仍是左侧列表中选中的会话，再点击该会话重新读取服务端状态。不要连续重复发送；网络中断或超时后，客户端会先核对原消息状态。
-
