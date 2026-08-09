@@ -1,5 +1,5 @@
 name: hakurei_terminal
-description: "HakureiTerminal desktop client for the GensokyoAI roleplay engine."
+description: "Dedicated Flutter frontend for an independently deployed GensokyoAI Runtime."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -35,6 +35,10 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   package_info_plus: ^9.0.0
+  archive: ^4.0.7
+  crypto: ^3.0.6
+  file_selector: ^1.0.4
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:
@@ -59,7 +63,17 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/python/README.txt
+    - assets/licenses/SourceHanSans-OFL-1.1.txt
+
+  fonts:
+    - family: SourceHanSansSC
+      fonts:
+        - asset: assets/fonts/SourceHanSansSC-Regular.otf
+          weight: 400
+        - asset: assets/fonts/SourceHanSansSC-Medium.otf
+          weight: 500
+        - asset: assets/fonts/SourceHanSansSC-Bold.otf
+          weight: 700
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

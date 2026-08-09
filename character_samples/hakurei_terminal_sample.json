@@ -1,0 +1,22 @@
+{
+  "id": "hakurei_terminal_sample",
+  "name": "[请填写角色名称]",
+  "description": "[请填写角色简介]",
+  "avatar": "",
+  "system_prompt": "[请填写角色的系统提示词]",
+  "provider_id": "jov_builtin",
+  "provider_assistant_id": "",
+  "default_thinking_engine_id": "builtin_chat",
+  "default_backend_id": "hakurei_terminal",
+  "model_override": {
+    "enabled": false
+  },
+  "memory_policy": {},
+  "metadata": {
+    "origin": "hakurei_terminal",
+    "owner": "hakurei_terminal",
+    "sample": true,
+    "author": "[请填写作者]",
+    "license": "[请填写许可证]"
+  }
+}
