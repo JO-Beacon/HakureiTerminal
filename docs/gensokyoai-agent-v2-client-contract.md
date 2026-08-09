@@ -2,7 +2,7 @@
 
 记录日期：2026-08-08
 
-适配目标（只读核对）：`C:\Users\27548\Desktop\gensokyoai-2026.8.8.0`
+适配目标：GensokyoAI `2026.8.8.0` 的公开 Runtime 契约（上游源码目录不属于本仓库）。
 
 - GensokyoAI package：`2026.8.8.0`
 - Runtime protocol：`2.2.0`（major `2`）

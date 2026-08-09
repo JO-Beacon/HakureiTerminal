@@ -10,7 +10,7 @@ A useful private report includes the affected version and platform, impact, mini
 
 Issues in GensokyoAI itself or in a model Provider should be reported to that upstream project or service. HakureiTerminal maintainers can address the first-party client, archive, transport, and integration boundary but cannot secure an independently operated Runtime or Provider deployment.
 
-HakureiTerminal is only a dedicated frontend. GensokyoAI `2026.7.14.0` is the sole execution and chat-state authority; disconnected operation cannot chat and must never fall back to local execution or direct Provider access.
+HakureiTerminal is only a dedicated frontend. GensokyoAI `2026.8.8.0` (Runtime protocol major `2`) is the sole execution and chat-state authority; disconnected operation cannot chat and must never fall back to local execution or direct Provider execution. Direct Provider access is limited to user-triggered model list and model metadata reads.
 
 ## Deployment Guidance
 
@@ -19,9 +19,9 @@ HakureiTerminal is only a dedicated frontend. GensokyoAI `2026.7.14.0` is the so
 - Never place a token in a URL, query string, screenshot, issue, shell history, or source file.
 - Treat `%APPDATA%/HakureiTerminal/settings.json` and every full `.jovarchive` as credentials because they can contain Provider API keys and Runtime tokens.
 - Delegate a Provider profile only to a Runtime instance and operator you trust. Revoking delegation prevents future initialization from sending the profile but cannot erase secrets already received by that process.
-- Treat character drafts and legacy local conversations/runtime data as local-only, inert content. Editing, importing, restoring, or starting the app must not upload them; no character upload API is currently supported.
+- Treat character drafts and legacy local conversations/runtime data as local-only, inert content. Editing, importing, restoring, or starting the app must not upload them. Character package upload, when used, requires an explicit destination, file, and option confirmation and uses only the documented public Runtime endpoint.
 - Run the repository and release boundary scanners documented in `README.md` before release.
 
 ## Supported Versions
 
-Security fixes are expected to target the current HakureiTerminal development line. External Runtime interoperability currently targets GensokyoAI `2026.7.14.0` protocol major version `1`; this statement is a compatibility target, not a promise to distribute or maintain that third-party software.
+Security fixes are expected to target the current HakureiTerminal development line. External Runtime interoperability currently targets GensokyoAI `2026.8.8.0` protocol major version `2`; this statement is a compatibility target, not a promise to distribute or maintain that third-party software.

@@ -2,6 +2,15 @@
 
 HakureiTerminal 是独立部署的 GensokyoAI Agent v2 Runtime 的专用 Flutter 前端。GensokyoAI 是可执行角色、聊天会话、消息、上下文、记忆、场景、工具、定时器和生成状态的唯一权威；HakureiTerminal 不包含聊天运行时，也不直接调用模型 Provider 执行生成、Embedding 或工具。用户明确操作时，客户端可直接读取用户配置 Provider 的模型列表和模型元数据。客户端只支持 Runtime 协议主版本 `2`，不兼容 v1，也不接入 `world.*`。
 
+## Downloads
+
+当前公开版本为 [v0.0.1-pre.1 Pre-release](https://github.com/JO-Beacon/HakureiTerminal/releases/tag/v0.0.1-pre.1)：
+
+- Windows x64：下载 `HakureiTerminal-0.0.1+1-windows-x64.zip`，解压后运行 `hakurei_terminal.exe`。
+- Android：下载 `HakureiTerminal-0.0.1+1-android-universal.apk`。该 Pre-release 使用 Android Debug 证书，仅适合测试安装。
+
+两个平台都需要用户自行部署并连接 GensokyoAI Runtime `2026.8.8.0`。
+
 客户端只使用 GensokyoAI 的公开 HTTP/WebSocket Runtime 契约。HakureiTerminal 不下载、安装、解包、启动或更新 GensokyoAI，不包含 Python bridge、嵌入式 Python、Chaquopy、本地角色部署逻辑，也不在源码、APK、桌面包、安装器或默认资源中分发 GensokyoAI 源码及其他第三方 Runtime payload。未连接时，应用仍可用于配置、非可执行角色草稿和一次性展示缓存，但不能聊天。
 
 ## Architecture
@@ -28,14 +37,14 @@ GensokyoAI 必须由用户或运维方在 HakureiTerminal 之外部署、配置 
 1. 在“设置 -> 服务管理 -> 外部服务连接”添加显示名称、Runtime 根 URL 和可选 token。保存只写入本地 `settings.json`，不会发起网络请求。
 2. 点击“测试连接”。客户端先以 `POST <base>/rpc` 调用 `runtime.info` 读取版本、方法、传输和流协议，再以 `GET <base>/health` 与 `GET <base>/ready` 检查健康和就绪状态。
 3. 客户端只接受 `protocol_major_version == 2`，并检查 Agent 生命周期、消息状态、会话、角色发现和 WebSocket v2 ack 所需的公开能力；`world.*` 不属于客户端能力范围。
-4. 测试成功后才能启用。启用只建立 `<base>/ws` 并读取本地已知映射；不会自动初始化角色、恢复会话或扫描其他角色的会话。
+4. 测试成功后，用户仍需对指定连接执行明确的连接操作。连接只建立 `<base>/ws` 并读取本地已知映射；不会自动初始化角色、恢复会话或扫描其他角色的会话。
 5. 每个连接持久化一个客户端生成的 UUID `agent_id`。用户明确选择角色和会话后，客户端以单一串行事务执行 `agent.init`，成功后才用该 `agent_id` 发送 `runtime.subscribe` 并分页读取 Runtime 权威历史及会话 `revision`。
 6. 普通管理 RPC 使用 `POST <base>/rpc`。外部消息使用 WebSocket `agent.send_message_stream`，携带显式 `agent_id`、`session_id`、`expected_revision` 和每次操作唯一的 `idempotency_key`；客户端先消费 v2 ack 中的 `stream_id` / `generation_id`，取消使用 `runtime.cancel_stream`。
 7. `session.list` 与 `session.messages` 按游标读取全部页面。事件订阅保存最后 `sequence`，重连时以 `after_sequence` 恢复。
 8. WebSocket 断开或发送超时后，客户端先用原 `idempotency_key` 调用 `message.status`，再读取 `session.messages` 对账；状态未确认时禁止以新 key 重发。客户端不启动本地服务，也不进行无限自动重试。
 9. 图片只在用户按下发送后上传到 `POST <base>/media`，消息引用服务端 `media_id`。角色包只在独立确认后上传到公开 `/character-packages` 管理员端点。
 
-保存连接和应用启动都不会连接，导入 `.jovarchive` 也不会连接：导入会保留 URL 和 token，但禁用全部外部连接、清除当前选择和 Provider 委托。每次启动后都需要用户显式执行测试或连接操作。
+保存连接和应用启动都不会连接，导入 `.jovarchive` 也不会连接：导入会保留 URL 和 token，但断开全部外部连接、清除当前选择和 Provider 委托。每次启动后都需要用户显式执行测试或连接操作。
 
 ### URL Policy
 
@@ -50,7 +59,7 @@ GensokyoAI 必须由用户或运维方在 HakureiTerminal 之外部署、配置 
 
 ### Provider Delegation
 
-模型 profile 仅保留用于向用户明确选择的 GensokyoAI Runtime 委托配置；HakureiTerminal 永不使用 profile 直接调用 Provider。Runtime 不会因为添加、测试或启用连接而收到 Provider Key。
+模型 profile 仅保留用于向用户明确选择的 GensokyoAI Runtime 委托配置；用户也可以在设置中明确刷新 Provider 模型列表和模型元数据。HakureiTerminal 永不使用 Provider 进行生成、Embedding、工具或上下文处理。Runtime 不会因为添加、测试或连接而收到 Provider Key。
 
 用户点击“委托当前模型配置”并确认后，连接只记录被委托的 profile ID。当该 profile 仍是当前 active profile 且外部 Agent 执行 `agent.init` 时，HakureiTerminal 才把主模型及 embedding 的 Provider、模型名、Base URL 和 API Key 作为公开 override 发送给指定 Runtime；生成参数也随主模型 override 发送。授权范围是当前 Runtime 实例，直到服务重启、再次初始化或用户撤销委托。撤销只阻止后续初始化继续发送，并不能从已接收数据的外部进程中远程擦除凭据。HakureiTerminal 不向 GensokyoAI 创建或管理持久 Provider profile。
 
@@ -62,7 +71,7 @@ Windows 的主要数据位置为 `%APPDATA%/HakureiTerminal/`；无法使用该�
 - `assistants/` 中的客户端创作内容是非可执行角色草稿；`conversations/` 中的旧本地会话、消息和上下文是惰性遗留数据或一次性展示缓存；`media/` 保存内容寻址媒体。它们都不是 GensokyoAI 执行状态。
 - `logs/` 用于本地 `.log` 文件。数据管理页只统计或删除该目录中的 `.log`，不删除设置或存档。
 - 完整 `.jovarchive` 包含 `settings/settings.json`，因此包含 Provider API Key 和 Runtime token。导出前会显示敏感凭据提示；不要公开分享归档。
-- 导入在本地解析、校验白名单路径和媒体 SHA-256，不联系 Provider 或 Runtime。恢复的外部连接保持禁用，直到用户再次明确操作。
+- 导入在本地解析、校验白名单路径和媒体 SHA-256，不联系 Provider 或 Runtime。恢复的外部连接保持断开，直到用户再次明确操作。
 - `.jovarchive` 不包含 GensokyoAI 服务端权威的完整角色、会话、消息、上下文、记忆、场景、工具、定时器或配置。归档内的旧本地会话和 Runtime 数据保持惰性，不会自动映射或上传；删除本地连接或本地存档不会删除外部 Runtime 上的数据。
 
 更多数据处理信息见 `PRIVACY.md`，安全报告方式见 `SECURITY.md`。
