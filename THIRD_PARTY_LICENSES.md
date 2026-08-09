@@ -5,9 +5,9 @@ HakureiTerminal is licensed under the Apache License 2.0. The HakureiTerminal so
 ## GensokyoAI
 
 - Role: independently deployed sole authority for executable characters, sessions, messages, context, memory, scenes, tools, timers, and generation state, used through its public HTTP/WebSocket Runtime API
-- Integrated protocol target: independently deployed `2026.7.14.0`
+- Integrated protocol target: independently deployed `2026.8.8.0`
 - Distribution model: not distributed, installed, downloaded, updated, or started by HakureiTerminal
-- `2026.7.14.0` license: Apache License 2.0
+- `2026.8.8.0` license: Apache License 2.0
 - Historical version fact: `2026.5.13.0` was licensed under the MIT License; it is not the current external protocol target
 - Copyright: Copyright (c) 2026 Patchouli-CN
 

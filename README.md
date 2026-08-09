@@ -11,6 +11,8 @@ HakureiTerminal 是独立部署的 GensokyoAI Agent v2 Runtime 的专用 Flutter
 
 两个平台都需要用户自行部署并连接 GensokyoAI Runtime `2026.8.8.0`。
 
+首次使用请阅读中文[使用指南](docs/user-guide.md)，其中包括 Runtime 连接、聊天、图片、刷新、Runtime 设置、模型列表、角色草稿和存档说明。
+
 客户端只使用 GensokyoAI 的公开 HTTP/WebSocket Runtime 契约。HakureiTerminal 不下载、安装、解包、启动或更新 GensokyoAI，不包含 Python bridge、嵌入式 Python、Chaquopy、本地角色部署逻辑，也不在源码、APK、桌面包、安装器或默认资源中分发 GensokyoAI 源码及其他第三方 Runtime payload。未连接时，应用仍可用于配置、非可执行角色草稿和一次性展示缓存，但不能聊天。
 
 ## Architecture
