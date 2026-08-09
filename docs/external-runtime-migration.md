@@ -35,18 +35,18 @@ For a service reachable beyond the same machine, expose it only through HTTPS/WS
 2. Add a display name, the Runtime base URL, and its token. Enter the root URL, not `/info`, `/rpc`, or `/ws`; do not put credentials or query parameters in the URL.
 3. Save the connection. Saving is local and performs no network request.
 4. Click “测试连接”. HakureiTerminal calls `runtime.info` through `/rpc`, then `/health`, verifies protocol major version `2`, and checks the required Agent v2 methods and WebSocket stream protocol.
-5. Enable the verified connection. Enabling explicitly negotiates `runtime.info` again and opens `/ws`; subscription occurs only after `agent.init`, using the connection's persisted `agent_id`.
+5. Use the explicit connection action for the verified profile. The action negotiates `runtime.info` again and opens `/ws`; subscription occurs only after `agent.init`, using the connection's persisted `agent_id`.
 6. Select external characters and sessions exposed by that service. The client reads the authoritative session `revision`; sends carry `expected_revision` and a UUID `idempotency_key`. After a disconnect or timeout it checks `message.status` before reconciling `session.messages` and never falls back to v1 or local execution.
 
-Application startup does not connect an enabled saved Runtime. Use the explicit connection action after each startup. Imported archives always restore connections disabled and do not initiate networking.
+Application startup does not connect a saved Runtime. Use the explicit connection action after each startup. Imported archives always restore connections disconnected and do not initiate networking.
 
 ## Provider Delegation
 
 GensokyoAI can use Provider configuration managed entirely on its own server. This is the safest separation when the Runtime operator should not receive credentials from HakureiTerminal.
 
-Alternatively, click the key action for a connection and explicitly confirm delegation of the current HakureiTerminal model profile. On a later `agent.init`, the client sends that profile's model and embedding Provider settings, including API keys, to that one Runtime instance. The Runtime does not receive the profile merely because the connection was saved, tested, or enabled.
+Alternatively, click the key action for a connection and explicitly confirm delegation of the current HakureiTerminal model profile. On a later `agent.init`, the client sends that profile's model and embedding Provider settings, including API keys, to that one Runtime instance. The Runtime does not receive the profile merely because the connection was saved, tested, or connected.
 
-HakureiTerminal retains model profiles only for this explicit delegation. It never uses them to call a Provider directly.
+HakureiTerminal retains model profiles for this explicit delegation. It may also read a user-configured Provider's model list or model metadata only after an explicit refresh action; it never uses the Provider for generation or other execution.
 
 Delegation is instance-level initialization data, not a persistent Provider profile managed by HakureiTerminal on the server. It lasts until service restart, another initialization, or local revocation. Revocation blocks future delegation but cannot remotely erase credentials already received. Do not delegate to a Runtime or operator you do not trust.
 
