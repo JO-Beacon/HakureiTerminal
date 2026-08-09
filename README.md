@@ -139,4 +139,4 @@ flutter build apk --release
 
 HakureiTerminal 使用 Apache License 2.0。外部互操作软件与 bundled font 的说明见 `THIRD_PARTY_LICENSES.md`。
 
-贡献前请阅读 `CONTRIBUTING.md` 和 `DCO.md`，不要提交 API Key、token、Cookie、密码、个人存档、生产配置、第三方 Runtime 源码或无权公开的素材。建议使用 `git commit -s` 签署 DCO。GensokyoAI 本体的修改应提交到其上游项目，而不是本仓库。
+问题报告、改进建议和需求讨论请提交 GitHub Issue；本仓库不接受 Pull Request。提交前请阅读 `CONTRIBUTING.md`，不要提交 API Key、token、Cookie、密码、个人存档、生产配置、第三方 Runtime 源码或无权公开的素材。GensokyoAI 本体的问题应提交到其上游项目。
