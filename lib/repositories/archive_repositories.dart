@@ -9,6 +9,7 @@ import '../models/assistant.dart';
 import '../models/app_settings.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
+import '../services/app_logger.dart';
 
 class ArchivePaths {
   ArchivePaths({Directory? root}) : root = root ?? _defaultRoot();
@@ -281,12 +282,20 @@ class ConversationContextState {
 }
 
 class AssistantArchiveRepository {
-  AssistantArchiveRepository({ArchivePaths? paths})
-    : paths = paths ?? ArchivePaths();
+  AssistantArchiveRepository({ArchivePaths? paths, AppLogger? logger})
+    : paths = paths ?? ArchivePaths(),
+      _logger = logger ?? AppLogger.instance;
 
   final ArchivePaths paths;
+  final AppLogger _logger;
 
-  Future<List<Assistant>> listAssistants() async {
+  Future<List<Assistant>> listAssistants() => _logger.trace<List<Assistant>>(
+    'drafts.list',
+    component: 'local_storage',
+    operation: _listAssistants,
+  );
+
+  Future<List<Assistant>> _listAssistants() async {
     final dir = paths.assistantsDir;
     if (!await dir.exists()) {
       return const <Assistant>[];
@@ -305,7 +314,15 @@ class AssistantArchiveRepository {
     return assistants;
   }
 
-  Future<Assistant?> getAssistant(String assistantId) async {
+  Future<Assistant?> getAssistant(String assistantId) =>
+      _logger.trace<Assistant?>(
+        'drafts.read',
+        component: 'local_storage',
+        data: <String, Object?>{'draft_ref': _logger.reference(assistantId)},
+        operation: () => _getAssistant(assistantId),
+      );
+
+  Future<Assistant?> _getAssistant(String assistantId) async {
     final file = paths.assistantFile(assistantId);
     if (!await file.exists()) {
       return null;
@@ -317,13 +334,27 @@ class AssistantArchiveRepository {
     return Assistant.fromJson(Map<String, dynamic>.from(decoded));
   }
 
-  Future<void> saveAssistant(Assistant assistant) async {
+  Future<void> saveAssistant(Assistant assistant) => _logger.trace<void>(
+    'drafts.save',
+    component: 'local_storage',
+    data: <String, Object?>{'draft_ref': _logger.reference(assistant.id)},
+    operation: () => _saveAssistant(assistant),
+  );
+
+  Future<void> _saveAssistant(Assistant assistant) async {
     final file = paths.assistantFile(assistant.id);
     await file.parent.create(recursive: true);
     await file.writeAsString(_prettyJson(assistant.toJson()));
   }
 
-  Future<void> deleteAssistant(String assistantId) async {
+  Future<void> deleteAssistant(String assistantId) => _logger.trace<void>(
+    'drafts.delete',
+    component: 'local_storage',
+    data: <String, Object?>{'draft_ref': _logger.reference(assistantId)},
+    operation: () => _deleteAssistant(assistantId),
+  );
+
+  Future<void> _deleteAssistant(String assistantId) async {
     final file = paths.assistantFile(assistantId);
     if (await file.exists()) {
       await file.delete();
@@ -332,22 +363,44 @@ class AssistantArchiveRepository {
 }
 
 class ConversationArchiveRepository {
-  ConversationArchiveRepository({ArchivePaths? paths})
-    : paths = paths ?? ArchivePaths();
+  ConversationArchiveRepository({ArchivePaths? paths, AppLogger? logger})
+    : paths = paths ?? ArchivePaths(),
+      _logger = logger ?? AppLogger.instance;
 
   final ArchivePaths paths;
+  final AppLogger _logger;
 
-  Future<void> createConversation(ChatSession conversation) async {
-    await saveConversation(conversation);
-  }
+  Future<void> createConversation(ChatSession conversation) =>
+      saveConversation(conversation);
 
-  Future<void> saveConversation(ChatSession conversation) async {
+  Future<void> saveConversation(ChatSession conversation) =>
+      _logger.trace<void>(
+        'conversations.save',
+        component: 'local_storage',
+        data: <String, Object?>{
+          'conversation_ref': _logger.reference(conversation.sessionId),
+          'turn_count': conversation.totalTurns,
+        },
+        operation: () => _saveConversation(conversation),
+      );
+
+  Future<void> _saveConversation(ChatSession conversation) async {
     final file = paths.conversationFile(conversation.sessionId);
     await file.parent.create(recursive: true);
     await file.writeAsString(_prettyJson(conversation.toJson()));
   }
 
-  Future<ChatSession?> getConversation(String conversationId) async {
+  Future<ChatSession?> getConversation(String conversationId) =>
+      _logger.trace<ChatSession?>(
+        'conversations.read',
+        component: 'local_storage',
+        data: <String, Object?>{
+          'conversation_ref': _logger.reference(conversationId),
+        },
+        operation: () => _getConversation(conversationId),
+      );
+
+  Future<ChatSession?> _getConversation(String conversationId) async {
     final file = paths.conversationFile(conversationId);
     if (!await file.exists()) {
       return null;
@@ -359,7 +412,14 @@ class ConversationArchiveRepository {
     return ChatSession.fromJson(Map<String, dynamic>.from(decoded));
   }
 
-  Future<List<ChatSession>> listConversations() async {
+  Future<List<ChatSession>> listConversations() =>
+      _logger.trace<List<ChatSession>>(
+        'conversations.list',
+        component: 'local_storage',
+        operation: _listConversations,
+      );
+
+  Future<List<ChatSession>> _listConversations() async {
     final dir = paths.conversationsDir;
     if (!await dir.exists()) {
       return const <ChatSession>[];
@@ -403,6 +463,19 @@ class ConversationArchiveRepository {
   }
 
   Future<void> duplicateConversation(
+    String sourceConversationId,
+    ChatSession duplicate,
+  ) => _logger.trace<void>(
+    'conversations.duplicate',
+    component: 'local_storage',
+    data: <String, Object?>{
+      'source_ref': _logger.reference(sourceConversationId),
+      'destination_ref': _logger.reference(duplicate.sessionId),
+    },
+    operation: () => _duplicateConversation(sourceConversationId, duplicate),
+  );
+
+  Future<void> _duplicateConversation(
     String sourceConversationId,
     ChatSession duplicate,
   ) async {
@@ -473,7 +546,23 @@ class ConversationArchiveRepository {
     }
   }
 
-  Future<void> appendMessage(String conversationId, ChatMessage message) async {
+  Future<void> appendMessage(String conversationId, ChatMessage message) =>
+      _logger.trace<void>(
+        'messages.append',
+        component: 'local_storage',
+        data: <String, Object?>{
+          'conversation_ref': _logger.reference(conversationId),
+          'message_ref': _logger.reference(message.id),
+          'role': message.role.name,
+          'content_chars': message.content.length,
+        },
+        operation: () => _appendMessage(conversationId, message),
+      );
+
+  Future<void> _appendMessage(
+    String conversationId,
+    ChatMessage message,
+  ) async {
     final file = paths.messagesFile(conversationId);
     await file.parent.create(recursive: true);
     await file.writeAsString(
@@ -482,7 +571,17 @@ class ConversationArchiveRepository {
     );
   }
 
-  Future<List<ChatMessage>> listMessages(String conversationId) async {
+  Future<List<ChatMessage>> listMessages(String conversationId) =>
+      _logger.trace<List<ChatMessage>>(
+        'messages.list',
+        component: 'local_storage',
+        data: <String, Object?>{
+          'conversation_ref': _logger.reference(conversationId),
+        },
+        operation: () => _listMessages(conversationId),
+      );
+
+  Future<List<ChatMessage>> _listMessages(String conversationId) async {
     final file = paths.messagesFile(conversationId);
     if (!await file.exists()) {
       return const <ChatMessage>[];
@@ -505,13 +604,37 @@ class ConversationArchiveRepository {
   Future<void> saveContext(
     String conversationId,
     ConversationContextState context,
+  ) => _logger.trace<void>(
+    'context_cache.save',
+    component: 'local_storage',
+    data: <String, Object?>{
+      'conversation_ref': _logger.reference(conversationId),
+      'included_message_count': context.includedMessageCount,
+      'excluded_message_count': context.excludedMessageCount,
+    },
+    operation: () => _saveContext(conversationId, context),
+  );
+
+  Future<void> _saveContext(
+    String conversationId,
+    ConversationContextState context,
   ) async {
     final file = paths.contextFile(conversationId);
     await file.parent.create(recursive: true);
     await file.writeAsString(_prettyJson(context.toJson()));
   }
 
-  Future<ConversationContextState?> getContext(String conversationId) async {
+  Future<ConversationContextState?> getContext(String conversationId) =>
+      _logger.trace<ConversationContextState?>(
+        'context_cache.read',
+        component: 'local_storage',
+        data: <String, Object?>{
+          'conversation_ref': _logger.reference(conversationId),
+        },
+        operation: () => _getContext(conversationId),
+      );
+
+  Future<ConversationContextState?> _getContext(String conversationId) async {
     final file = paths.contextFile(conversationId);
     if (!await file.exists()) {
       return null;
@@ -525,7 +648,16 @@ class ConversationArchiveRepository {
     );
   }
 
-  Future<void> deleteConversation(String conversationId) async {
+  Future<void> deleteConversation(String conversationId) => _logger.trace<void>(
+    'conversations.delete',
+    component: 'local_storage',
+    data: <String, Object?>{
+      'conversation_ref': _logger.reference(conversationId),
+    },
+    operation: () => _deleteConversation(conversationId),
+  );
+
+  Future<void> _deleteConversation(String conversationId) async {
     final dir = paths.conversationDir(conversationId);
     if (await dir.exists()) {
       await dir.delete(recursive: true);
@@ -554,10 +686,12 @@ class JovArchiveImportSummary {
 }
 
 class JovArchiveExportRepository {
-  JovArchiveExportRepository({ArchivePaths? paths})
-    : paths = paths ?? ArchivePaths();
+  JovArchiveExportRepository({ArchivePaths? paths, AppLogger? logger})
+    : paths = paths ?? ArchivePaths(),
+      _logger = logger ?? AppLogger.instance;
 
   final ArchivePaths paths;
+  final AppLogger _logger;
 
   /// 允许进入/离开存档包的顶层前缀；用于全量导出与导入安全校验。
   static const List<String> _fullArchivePrefixes = <String>[
@@ -571,6 +705,29 @@ class JovArchiveExportRepository {
 
   /// 导出全部本地存档（角色和会话）为一个 .jovarchive 包。
   Future<File> exportAllToFile(
+    File output, {
+    AppearanceSettings? appearance,
+    List<UserRoleSettings>? userRoles,
+    String? activeUserRoleId,
+    AppSettings? settings,
+  }) => _logger.trace<File>(
+    'archive.export_all',
+    component: 'archive',
+    data: <String, Object?>{
+      'includes_appearance': appearance != null,
+      'user_role_count': userRoles?.length ?? 0,
+      'includes_settings': settings != null,
+    },
+    operation: () => _exportAllToFile(
+      output,
+      appearance: appearance,
+      userRoles: userRoles,
+      activeUserRoleId: activeUserRoleId,
+      settings: settings,
+    ),
+  );
+
+  Future<File> _exportAllToFile(
     File output, {
     AppearanceSettings? appearance,
     List<UserRoleSettings>? userRoles,
@@ -676,7 +833,15 @@ class JovArchiveExportRepository {
 
   /// 导入 .jovarchive 包，覆盖同名文件，返回导入统计。
   /// 只解出白名单前缀内的条目，并拒绝路径穿越，防止 zip-slip。
-  Future<JovArchiveImportSummary> importAllFromBytes(List<int> bytes) async {
+  Future<JovArchiveImportSummary> importAllFromBytes(List<int> bytes) =>
+      _logger.trace<JovArchiveImportSummary>(
+        'archive.import_all',
+        component: 'archive',
+        data: <String, Object?>{'archive_bytes': bytes.length},
+        operation: () => _importAllFromBytes(bytes),
+      );
+
+  Future<JovArchiveImportSummary> _importAllFromBytes(List<int> bytes) async {
     final archive = ZipDecoder().decodeBytes(bytes);
     final manifestEntry = archive.files
         .where((file) => file.name == 'manifest.json')
@@ -830,7 +995,18 @@ class JovArchiveExportRepository {
     );
   }
 
-  Future<File> exportConversation(
+  Future<File> exportConversation(String conversationId, {String? archiveId}) =>
+      _logger.trace<File>(
+        'archive.export_conversation',
+        component: 'archive',
+        data: <String, Object?>{
+          'conversation_ref': _logger.reference(conversationId),
+        },
+        operation: () =>
+            _exportConversation(conversationId, archiveId: archiveId),
+      );
+
+  Future<File> _exportConversation(
     String conversationId, {
     String? archiveId,
   }) async {
@@ -906,6 +1082,7 @@ class JovArchiveExportRepository {
     }
     final conversation = await ConversationArchiveRepository(
       paths: paths,
+      logger: _logger,
     ).getConversation(conversationId);
     final mediaPaths = <String>{
       conversation?.backgroundImagePath ?? '',

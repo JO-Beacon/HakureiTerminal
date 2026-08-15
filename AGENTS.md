@@ -9,6 +9,16 @@
 - When evidence disproves an earlier hypothesis, state that directly and discard the hypothesis instead of layering more changes on top.
 - Add a regression test that fails for the identified root cause and passes with the fix.
 
+## Mandatory Structured Logging
+
+- Every new feature and every material change to an existing feature must integrate with HakureiTerminal's structured application logger before the work is considered complete.
+- Log the feature's user-triggered lifecycle, external-service and persistence boundaries, meaningful state transitions, successful outcomes, rejected operations, and failures with stable event names and actionable metadata such as duration, status code, byte/count totals, capability names, and hashed resource references.
+- Logging must be diagnostic without becoming a second source of product state. Log files are disposable diagnostics and must never be read as execution context, used to reconstruct Runtime state, or used as a fallback when GensokyoAI is unavailable.
+- Never log Runtime tokens, Provider API keys, Authorization or Cookie headers, URL credentials or queries, request/response bodies, prompts, message or reasoning content, tool arguments/results, TTS input text, character draft content, settings payloads, archive contents, or unredacted local paths.
+- Use the shared `AppLogger` redaction, URI sanitization, reference hashing, rotation, clearing, flushing, and export mechanisms. Do not add ad hoc `print`, `debugPrint`, private log files, or feature-specific logging formats.
+- Logging must not change feature behavior or turn a successful operation into a failure. Logger I/O failures remain isolated from application behavior.
+- Add or update tests which prove that the feature emits the required success/failure events and that representative secrets and content cannot appear in logs or exported diagnostics.
+
 ## GensokyoAI Frontend Boundary
 
 - HakureiTerminal is a dedicated frontend for an independently deployed GensokyoAI Runtime. GensokyoAI is the sole authority for executable characters, chat sessions, messages, context, memory, scenes, tools, timers, and generation state.

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 
 import 'archive_repositories.dart';
+import '../services/app_logger.dart';
 
 class ManagedMediaFile {
   const ManagedMediaFile({
@@ -25,9 +26,11 @@ class ManagedMediaFile {
 }
 
 class MediaRepository {
-  MediaRepository({required this.paths});
+  MediaRepository({required this.paths, AppLogger? logger})
+    : _logger = logger ?? AppLogger.instance;
 
   final ArchivePaths paths;
+  final AppLogger _logger;
 
   static bool isContentAddressedPath(String relativePath) {
     return RegExp(
@@ -35,7 +38,14 @@ class MediaRepository {
     ).hasMatch(relativePath.trim().replaceAll('\\', '/'));
   }
 
-  Future<String> storeBytes(List<int> bytes) async {
+  Future<String> storeBytes(List<int> bytes) => _logger.trace<String>(
+    'media.store',
+    component: 'local_storage',
+    data: <String, Object?>{'byte_count': bytes.length},
+    operation: () => _storeBytes(bytes),
+  );
+
+  Future<String> _storeBytes(List<int> bytes) async {
     if (bytes.isEmpty) {
       throw const FormatException('不能存储空媒体文件');
     }
@@ -49,11 +59,17 @@ class MediaRepository {
     return relativePath;
   }
 
-  Future<String> storeFile(File source) async {
-    return storeBytes(await source.readAsBytes());
-  }
+  Future<String> storeFile(File source) async =>
+      storeBytes(await source.readAsBytes());
 
-  Future<List<ManagedMediaFile>> listManagedFiles() async {
+  Future<List<ManagedMediaFile>> listManagedFiles() =>
+      _logger.trace<List<ManagedMediaFile>>(
+        'media.list',
+        component: 'local_storage',
+        operation: _listManagedFiles,
+      );
+
+  Future<List<ManagedMediaFile>> _listManagedFiles() async {
     final files = <String, File>{};
 
     Future<void> collect(

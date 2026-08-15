@@ -2,12 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' show PointerDeviceKind;
-import 'dart:ui' as ui show instantiateImageCodec;
+import 'dart:ui' as ui show PlatformDispatcher, instantiateImageCodec;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import 'models/app_settings.dart';
 import 'models/assistant.dart';
@@ -26,6 +27,7 @@ import 'services/runtime/http_runtime_client.dart';
 import 'services/runtime/runtime_connection.dart';
 import 'services/runtime/runtime_conversation_controller.dart';
 import 'services/settings_store.dart';
+import 'services/app_logger.dart';
 import 'services/tts_service.dart';
 import 'theme/app_theme.dart';
 import 'widgets/text_context_menu.dart';
@@ -183,6 +185,45 @@ String localExternalSessionId(
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final archivePaths = await ArchivePaths.createDefault();
+  final logger = AppLogger.instance;
+  await logger.initialize(archivePaths.logsDir);
+  final previousFlutterError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    logger.error(
+      'application.flutter_error',
+      component: 'application',
+      error: details.exception,
+    );
+    previousFlutterError?.call(details);
+  };
+  final previousPlatformError = ui.PlatformDispatcher.instance.onError;
+  ui.PlatformDispatcher.instance.onError = (error, stackTrace) {
+    logger.error(
+      'application.platform_error',
+      component: 'application',
+      error: error,
+    );
+    return previousPlatformError?.call(error, stackTrace) ?? false;
+  };
+  try {
+    final packageInfo = await PackageInfo.fromPlatform();
+    logger.info(
+      'application.started',
+      component: 'application',
+      data: <String, Object?>{
+        'version': packageInfo.version,
+        'build_number': packageInfo.buildNumber,
+        'operating_system': Platform.operatingSystem,
+        'operating_system_version': Platform.operatingSystemVersion,
+      },
+    );
+  } catch (error) {
+    logger.warning(
+      'application.package_info_unavailable',
+      component: 'application',
+      error: error,
+    );
+  }
   Brightness? platformBrightness;
   try {
     platformBrightness =
@@ -357,7 +398,8 @@ class HakureiTerminalApp extends StatefulWidget {
   State<HakureiTerminalApp> createState() => _HakureiTerminalAppState();
 }
 
-class _HakureiTerminalAppState extends State<HakureiTerminalApp> {
+class _HakureiTerminalAppState extends State<HakureiTerminalApp>
+    with WidgetsBindingObserver {
   late AppSettings _settings;
   late final SettingsStore _settingsStore;
   late final ArchivePaths _archivePaths;
@@ -366,6 +408,11 @@ class _HakureiTerminalAppState extends State<HakureiTerminalApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    AppLogger.instance.info(
+      'application.ui_initialized',
+      component: 'application',
+    );
     _settings = widget.initialSettings;
     _settingsStore = widget.settingsStore ?? SettingsStore();
     _archivePaths =
@@ -377,6 +424,30 @@ class _HakureiTerminalAppState extends State<HakureiTerminalApp> {
       _initialSettingsLoad = _settingsStore.load();
       unawaited(_restoreInitialTheme());
     }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    AppLogger.instance.info(
+      'application.lifecycle_changed',
+      component: 'application',
+      data: <String, Object?>{'state': state.name},
+    );
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(AppLogger.instance.flush());
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    AppLogger.instance.info(
+      'application.ui_disposed',
+      component: 'application',
+    );
+    unawaited(AppLogger.instance.flush());
+    super.dispose();
   }
 
   Future<void> _restoreInitialTheme() async {
@@ -2150,6 +2221,17 @@ class _ChatScreenState extends State<ChatScreen> {
       throw StateError('Runtime 连接档案不存在：$connectionId');
     }
     await _deactivateExternalRuntime();
+    final logger = AppLogger.instance;
+    final connectionRef = logger.reference(connection.id);
+    logger.info(
+      'runtime.activation_requested',
+      component: 'application',
+      data: <String, Object?>{
+        'connection_ref': connectionRef,
+        'base_url': logger.safeUri(connection.baseUrl),
+        'provider_delegated': connection.delegatedProfileId.isNotEmpty,
+      },
+    );
     final client = GensokyoAiHttpRuntimeClient(connection: connection);
     final controller = RuntimeConversationController(
       runtime: GensokyoAiConversationRuntime(
@@ -2185,7 +2267,13 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       });
       await controller.connect();
-    } catch (_) {
+    } catch (error) {
+      logger.error(
+        'runtime.activation_failed',
+        component: 'application',
+        data: <String, Object?>{'connection_ref': connectionRef},
+        error: error,
+      );
       await _disposeRuntimeController();
       if (mounted) {
         setState(() {
@@ -2201,6 +2289,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) {
       setState(() => _externalBackendAvailable = true);
     }
+    logger.info(
+      'runtime.activation_succeeded',
+      component: 'application',
+      data: <String, Object?>{'connection_ref': connectionRef},
+    );
   }
 
   Future<ExternalAgentRuntime> _activateExternalRuntimeFacade(
@@ -2214,6 +2307,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _deactivateExternalRuntime() async {
+    AppLogger.instance.info(
+      'runtime.deactivation_requested',
+      component: 'application',
+    );
     await _disposeRuntimeController();
     if (mounted) {
       setState(() {
@@ -2226,6 +2323,10 @@ class _ChatScreenState extends State<ChatScreen> {
         _selectedSession = null;
       });
     }
+    AppLogger.instance.info(
+      'runtime.deactivation_completed',
+      component: 'application',
+    );
   }
 
   Future<void> _openBackendSettings() {

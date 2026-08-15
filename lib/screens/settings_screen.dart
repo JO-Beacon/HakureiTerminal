@@ -20,6 +20,7 @@ import '../services/runtime/external_agent_runtime.dart';
 import '../services/runtime/http_runtime_client.dart';
 import '../services/runtime/runtime_connection.dart';
 import '../services/provider_model_catalog.dart';
+import '../services/app_logger.dart';
 import '../theme/app_theme.dart';
 import '../widgets/color_picker.dart';
 import '../widgets/app_background.dart';
@@ -40,33 +41,6 @@ enum SettingsInitialPage {
   backend,
   developerOptions,
   about,
-}
-
-@visibleForTesting
-Future<({int deleted, int failed})> deleteLegacyRuntimeData(
-  ArchivePaths paths,
-) async {
-  var deleted = 0;
-  var failed = 0;
-  for (final name in <String>[
-    'backends',
-    'runtime_data',
-    'character_deployments',
-  ]) {
-    final directory = Directory(
-      '${paths.root.path}${Platform.pathSeparator}$name',
-    );
-    if (!await directory.exists()) {
-      continue;
-    }
-    try {
-      await directory.delete(recursive: true);
-      deleted++;
-    } on FileSystemException {
-      failed++;
-    }
-  }
-  return (deleted: deleted, failed: failed);
 }
 
 class SettingsOperation {
@@ -116,6 +90,7 @@ class SettingsScreen extends StatefulWidget {
     this.conversationRepository,
     this.mediaRepository,
     this.providerModelCatalog,
+    this.logger,
     this.onSettingsChanged,
     this.onOperation,
     this.onActivateExternalRuntime,
@@ -134,6 +109,7 @@ class SettingsScreen extends StatefulWidget {
   final ConversationArchiveRepository? conversationRepository;
   final MediaRepository? mediaRepository;
   final ProviderModelCatalog? providerModelCatalog;
+  final AppLogger? logger;
   final ValueChanged<AppSettings>? onSettingsChanged;
   final Future<void> Function(SettingsOperation operation)? onOperation;
   final Future<ExternalAgentRuntime> Function(
@@ -185,6 +161,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final ConversationArchiveRepository _conversationRepository;
   late final MediaRepository _mediaRepository;
   late final ProviderModelCatalog _providerModelCatalog;
+  late final AppLogger _logger;
   List<Assistant> _localAssistants = const <Assistant>[];
   List<ChatSession> _archivedConversations = const <ChatSession>[];
   List<File> _logFiles = const <File>[];
@@ -194,7 +171,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loadingArchiveData = false;
   bool _loadingLogs = false;
   bool _clearingLogs = false;
-  bool _clearingLegacyRuntimeData = false;
+  bool _exportingLogs = false;
   Map<String, ModelCapabilityProfile> _modelCapabilities =
       const <String, ModelCapabilityProfile>{};
   List<ProviderModelCatalogEntry> _providerModels =
@@ -335,6 +312,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         MediaRepository(paths: _assistantRepository.paths);
     _providerModelCatalog =
         widget.providerModelCatalog ?? HttpProviderModelCatalog();
+    _logger = widget.logger ?? AppLogger.instance;
     _selectedPage = _settingsPageFromInitialPage(
       widget.initialPage ?? SettingsInitialPage.modelProvider,
     );
@@ -2977,6 +2955,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       (total, media) => total + media.byteLength,
     );
     return ListView(
+      key: const ValueKey<String>('storageSettingsPage'),
       padding: const EdgeInsets.all(10),
       children: <Widget>[
         _SettingsSection(
@@ -3091,37 +3070,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         const SizedBox(height: 20),
         _SettingsSection(
-          icon: Icons.delete_forever_outlined,
-          title: '旧本地 Runtime 数据',
-          description:
-              '旧版本创建的本地 Runtime 文件不会被当前版本读取、上传或自动迁移。请先使用旧 Runtime 自带工具备份仍需保留的数据。',
-          children: <Widget>[
-            SelectableText(
-              contextMenuBuilder: jovTextContextMenu,
-              _assistantRepository.paths.root.path,
-            ),
-            const SizedBox(height: 12),
-            FilledButton.tonalIcon(
-              key: const ValueKey<String>('clearLegacyRuntimeData'),
-              onPressed: _clearingLegacyRuntimeData
-                  ? null
-                  : _clearLegacyRuntimeData,
-              icon: const Icon(Icons.delete_forever_outlined),
-              label: Text(
-                _clearingLegacyRuntimeData ? '正在删除...' : '删除旧本地 Runtime 数据',
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              '仅删除数据根目录中的 backends/、runtime_data/ 和 character_deployments/；不会删除设置、角色、会话、消息、媒体、日志或远端服务数据。',
-            ),
-          ],
-        ),
-        const SizedBox(height: 20),
-        _SettingsSection(
           icon: Icons.article_outlined,
           title: '日志管理',
-          description: '管理 HakureiTerminal 与可选运行服务写入的本地诊断日志，不会删除存档或配置。',
+          description: '管理 HakureiTerminal 自动写入的结构化诊断日志，不会删除存档或配置。',
           children: <Widget>[
             Wrap(
               spacing: 8,
@@ -3153,6 +3104,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   label: const Text('打开日志目录'),
                 ),
                 FilledButton.tonalIcon(
+                  onPressed: _logFiles.isEmpty || _exportingLogs
+                      ? null
+                      : _exportLogFiles,
+                  icon: const Icon(Icons.download_outlined),
+                  label: Text(_exportingLogs ? '正在导出...' : '导出诊断日志'),
+                ),
+                FilledButton.tonalIcon(
                   onPressed: _logFiles.isEmpty || _clearingLogs
                       ? null
                       : _clearLogFiles,
@@ -3162,7 +3120,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            const Text('仅处理日志目录内的 .log 文件；被其他进程占用的文件会保留并在结果中说明。'),
+            Text(
+              '日志采用 JSON Lines，单文件最多 ${_formatFileSize(_logger.maxFileBytes)}，'
+              '最多保留 ${_logger.maxFiles} 个文件。导出 ZIP 不包含设置、凭据、消息正文或模型输入。',
+            ),
           ],
         ),
       ],
@@ -3318,83 +3279,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     setState(() => _clearingLogs = true);
-    var deleted = 0;
-    var failed = 0;
-    for (final file in List<File>.from(_logFiles)) {
-      try {
-        if (file.existsSync()) {
-          file.deleteSync();
-          deleted++;
-        }
-      } on FileSystemException {
-        failed++;
-      }
-    }
+    final result = await _logger.clearLogs(
+      directory: _assistantRepository.paths.logsDir,
+    );
     await _loadLogData();
     if (!mounted) {
       return;
     }
     setState(() => _clearingLogs = false);
-    final result = failed == 0
-        ? '已清除 $deleted 个日志文件'
-        : '已清除 $deleted 个日志文件，$failed 个文件因正在使用或无权限而保留';
-    showTopNotice(context, result);
+    final message = result.failed == 0
+        ? '已清除 ${result.deleted} 个日志文件；新的审计日志已开始记录'
+        : '已清除 ${result.deleted} 个日志文件，${result.failed} 个文件因正在使用或无权限而保留';
+    showTopNotice(context, message);
   }
 
-  Future<void> _clearLegacyRuntimeData() async {
-    final root = _assistantRepository.paths.root.path;
-    final directories = <Directory>[
-      for (final name in <String>[
-        'backends',
-        'runtime_data',
-        'character_deployments',
-      ])
-        Directory('$root${Platform.pathSeparator}$name'),
-    ];
-    final existing = directories
-        .where((directory) => directory.existsSync())
-        .toList(growable: false);
-    if (existing.isEmpty) {
-      showTopNotice(context, '没有找到旧本地 Runtime 数据');
-      return;
+  Future<void> _exportLogFiles() async {
+    setState(() => _exportingLogs = true);
+    try {
+      final timestamp = DateTime.now().toUtc().toIso8601String().replaceAll(
+        RegExp(r'[:.]'),
+        '-',
+      );
+      final fileName = 'HakureiTerminal-diagnostics-$timestamp.zip';
+      late final File output;
+      if (Platform.isAndroid) {
+        final directory =
+            await getExternalStorageDirectory() ??
+            await getApplicationDocumentsDirectory();
+        output = File('${directory.path}${Platform.pathSeparator}$fileName');
+      } else {
+        final location = await getSaveLocation(
+          suggestedName: fileName,
+          acceptedTypeGroups: const <XTypeGroup>[
+            XTypeGroup(label: '诊断日志 ZIP', extensions: <String>['zip']),
+          ],
+        );
+        if (location == null) return;
+        output = File(location.path);
+      }
+      await _logger.exportLogsToFile(
+        output,
+        sourceDirectory: _assistantRepository.paths.logsDir,
+      );
+      await _loadLogData();
+      if (mounted) {
+        showTopNotice(context, '诊断日志已导出：${output.path}');
+      }
+    } catch (error) {
+      if (mounted) showTopNotice(context, '导出诊断日志失败：$error');
+    } finally {
+      if (mounted) setState(() => _exportingLogs = false);
     }
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('删除旧本地 Runtime 数据'),
-        content: Text(
-          '将永久删除以下 ${existing.length} 个目录及其全部内容：\n\n'
-          '${existing.map((directory) => directory.path).join('\n')}\n\n'
-          '此操作无法撤销。请先确认旧 Runtime 的角色、会话、记忆和配置已按需备份。',
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            key: const ValueKey<String>('confirmClearLegacyRuntimeData'),
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('永久删除'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) {
-      return;
-    }
-    setState(() => _clearingLegacyRuntimeData = true);
-    final result = await deleteLegacyRuntimeData(_assistantRepository.paths);
-    if (!mounted) {
-      return;
-    }
-    setState(() => _clearingLegacyRuntimeData = false);
-    showTopNotice(
-      context,
-      result.failed == 0
-          ? '已删除 ${result.deleted} 个旧 Runtime 目录'
-          : '已删除 ${result.deleted} 个目录，${result.failed} 个删除失败',
-    );
   }
 
   String _formatFileSize(int bytes) {
@@ -4601,8 +4536,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }) async {
     final result = await showDialog<ExternalRuntimeConnectionSettings>(
       context: context,
-      builder: (context) =>
-          _ExternalRuntimeConnectionDialog(connection: connection),
+      builder: (context) => _ExternalRuntimeConnectionDialog(
+        connection: connection,
+        logger: _logger,
+      ),
     );
     if (result == null || !mounted) {
       return;
@@ -6135,9 +6072,13 @@ class _AssistantAvatar extends StatelessWidget {
 }
 
 class _ExternalRuntimeConnectionDialog extends StatefulWidget {
-  const _ExternalRuntimeConnectionDialog({this.connection});
+  const _ExternalRuntimeConnectionDialog({
+    this.connection,
+    required this.logger,
+  });
 
   final ExternalRuntimeConnectionSettings? connection;
+  final AppLogger logger;
 
   @override
   State<_ExternalRuntimeConnectionDialog> createState() =>
@@ -6149,14 +6090,61 @@ class _ExternalRuntimeConnectionDialogState
   late String _name;
   late String _url;
   late String _token;
+  String? _urlError;
 
   @override
   void initState() {
     super.initState();
     final connection = widget.connection;
     _name = connection?.displayName ?? '';
-    _url = connection?.baseUrl ?? 'https://';
+    _url = connection?.baseUrl ?? '';
     _token = connection?.authToken ?? '';
+  }
+
+  String? get _webSocketPreview {
+    try {
+      return const RuntimeEndpointPolicy().webSocketUri(_url).toString();
+    } on FormatException {
+      return null;
+    }
+  }
+
+  ({String message, String reason, String scheme}) _urlValidationDetails() {
+    final uri = Uri.tryParse(_url.trim());
+    final scheme = uri?.scheme.toLowerCase() ?? '';
+    if (scheme == 'ws' || scheme == 'wss') {
+      return (
+        message: '请填写 HTTP/HTTPS 根地址，不要填写 ws:// 或 wss://。',
+        reason: 'websocket_scheme',
+        scheme: scheme,
+      );
+    }
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      return (
+        message: '请输入完整的 Runtime 根地址。',
+        reason: 'invalid_url',
+        scheme: scheme.isEmpty ? 'missing' : 'other',
+      );
+    }
+    if (uri.userInfo.isNotEmpty || uri.queryParameters.isNotEmpty) {
+      return (
+        message: '地址中不能包含账号、密码、令牌或查询参数。',
+        reason: 'credentials_or_query',
+        scheme: scheme,
+      );
+    }
+    if (scheme == 'http') {
+      return (
+        message: '非本机 Runtime 必须使用 HTTPS。',
+        reason: 'insecure_remote_http',
+        scheme: scheme,
+      );
+    }
+    return (
+      message: '请输入 HTTPS 地址；本机可使用 http://127.0.0.1。',
+      reason: 'unsupported_scheme',
+      scheme: const <String>{'https'}.contains(scheme) ? scheme : 'other',
+    );
   }
 
   void _cancel() {
@@ -6191,8 +6179,26 @@ class _ExternalRuntimeConnectionDialogState
           delegatedProfileId: existing?.delegatedProfileId ?? '',
         ),
       );
+      widget.logger.info(
+        'runtime.connection_profile.validated',
+        component: 'settings',
+        data: <String, Object?>{
+          'action': existing == null ? 'create' : 'edit',
+          'endpoint': widget.logger.safeUri(normalized),
+          'token_configured': _token.trim().isNotEmpty,
+        },
+      );
     } on FormatException {
-      showTopNotice(context, '请输入 HTTPS URL，或明确的 localhost HTTP URL。');
+      final details = _urlValidationDetails();
+      setState(() => _urlError = details.message);
+      widget.logger.warning(
+        'runtime.connection_profile.validation_rejected',
+        component: 'settings',
+        data: <String, Object?>{
+          'reason': details.reason,
+          'scheme': details.scheme,
+        },
+      );
     }
   }
 
@@ -6203,29 +6209,73 @@ class _ExternalRuntimeConnectionDialogState
         widget.connection == null ? '添加 GensokyoAI 连接' : '编辑 GensokyoAI 连接',
       ),
       content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            TextFormField(
-              key: const ValueKey<String>('externalRuntimeNameField'),
-              initialValue: _name,
-              onChanged: (value) => _name = value,
-              decoration: const InputDecoration(labelText: '显示名称'),
-            ),
-            TextFormField(
-              key: const ValueKey<String>('externalRuntimeUrlField'),
-              initialValue: _url,
-              onChanged: (value) => _url = value,
-              decoration: const InputDecoration(labelText: '服务 URL'),
-            ),
-            TextFormField(
-              key: const ValueKey<String>('externalRuntimeTokenField'),
-              initialValue: _token,
-              onChanged: (value) => _token = value,
-              obscureText: true,
-              decoration: const InputDecoration(labelText: 'Runtime 令牌'),
-            ),
-          ],
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              TextFormField(
+                key: const ValueKey<String>('externalRuntimeNameField'),
+                initialValue: _name,
+                onChanged: (value) => _name = value,
+                decoration: const InputDecoration(labelText: '显示名称'),
+              ),
+              const SizedBox(height: 8),
+              TextFormField(
+                key: const ValueKey<String>('externalRuntimeUrlField'),
+                initialValue: _url,
+                keyboardType: TextInputType.url,
+                autocorrect: false,
+                enableSuggestions: false,
+                onChanged: (value) {
+                  setState(() {
+                    _url = value;
+                    _urlError = null;
+                  });
+                },
+                decoration: InputDecoration(
+                  labelText: 'Runtime 根地址（HTTP/HTTPS）',
+                  hintText: 'http://127.0.0.1:8765',
+                  helperText:
+                      '本机使用 HTTP；远程使用 HTTPS。不要填写 ws://、wss://、/ws 或 /rpc。',
+                  helperMaxLines: 2,
+                  errorText: _urlError,
+                  errorMaxLines: 2,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(Icons.swap_horiz, size: 18),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _webSocketPreview == null
+                          ? 'WebSocket 地址会由客户端自动生成。'
+                          : 'WebSocket 将自动连接：$_webSocketPreview',
+                      key: const ValueKey<String>(
+                        'externalRuntimeWebSocketPreview',
+                      ),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              TextFormField(
+                key: const ValueKey<String>('externalRuntimeTokenField'),
+                initialValue: _token,
+                onChanged: (value) => _token = value,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Runtime 令牌（可选）'),
+              ),
+            ],
+          ),
         ),
       ),
       actions: <Widget>[

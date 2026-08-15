@@ -4,18 +4,32 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
 import '../models/app_settings.dart';
+import 'app_logger.dart';
 
 class SettingsStore {
-  SettingsStore({File? file, AppSettings? defaultSettings})
+  SettingsStore({File? file, AppSettings? defaultSettings, AppLogger? logger})
     : _file = file,
-      _defaultSettings = defaultSettings ?? AppSettings.defaultSettings;
+      _defaultSettings = defaultSettings ?? AppSettings.defaultSettings,
+      _logger = logger ?? AppLogger.instance;
 
   final File? _file;
   final AppSettings _defaultSettings;
+  final AppLogger _logger;
 
-  Future<AppSettings> load() async {
+  Future<AppSettings> load() => _logger.trace<AppSettings>(
+    'settings.load',
+    component: 'settings',
+    operation: _load,
+  );
+
+  Future<AppSettings> _load() async {
     final file = await _settingsFileAsync();
     if (!await file.exists()) {
+      _logger.info(
+        'settings.defaults_used',
+        component: 'settings',
+        data: const <String, Object?>{'reason': 'file_missing'},
+      );
       return _defaultSettings;
     }
 
@@ -32,7 +46,13 @@ class SettingsStore {
         await _persistRuntimeIdentityMigration(file, json, settings);
         return settings;
       }
-    } catch (_) {
+    } catch (error) {
+      _logger.warning(
+        'settings.defaults_used',
+        component: 'settings',
+        data: const <String, Object?>{'reason': 'invalid_file'},
+        error: error,
+      );
       return _defaultSettings;
     }
     return _defaultSettings;
@@ -68,7 +88,13 @@ class SettingsStore {
     await file.writeAsString(encoder.convert(settings.toJson()));
   }
 
-  Future<void> save(AppSettings settings) async {
+  Future<void> save(AppSettings settings) => _logger.trace<void>(
+    'settings.save',
+    component: 'settings',
+    operation: () => _save(settings),
+  );
+
+  Future<void> _save(AppSettings settings) async {
     final file = await _settingsFileAsync();
     await file.parent.create(recursive: true);
     const encoder = JsonEncoder.withIndent('  ');
@@ -76,10 +102,21 @@ class SettingsStore {
   }
 
   void saveSync(AppSettings settings) {
-    final file = _settingsFile();
-    file.parent.createSync(recursive: true);
-    const encoder = JsonEncoder.withIndent('  ');
-    file.writeAsStringSync(encoder.convert(settings.toJson()));
+    _logger.debug('settings.save_sync.started', component: 'settings');
+    try {
+      final file = _settingsFile();
+      file.parent.createSync(recursive: true);
+      const encoder = JsonEncoder.withIndent('  ');
+      file.writeAsStringSync(encoder.convert(settings.toJson()));
+      _logger.info('settings.save_sync.succeeded', component: 'settings');
+    } catch (error) {
+      _logger.error(
+        'settings.save_sync.failed',
+        component: 'settings',
+        error: error,
+      );
+      rethrow;
+    }
   }
 
   File _settingsFile() {

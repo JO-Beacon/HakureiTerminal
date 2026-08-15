@@ -3,23 +3,38 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../../models/app_settings.dart';
+import '../app_logger.dart';
 import '../../models/runtime_identity.dart';
 import 'external_runtime_event.dart';
 import 'runtime_connection.dart';
 import 'runtime_reply.dart';
 import 'runtime_stream_event.dart';
 
+typedef RuntimeWebSocketConnector =
+    Future<WebSocket> Function(String url, {Map<String, dynamic>? headers});
+
+Future<WebSocket> _defaultWebSocketConnector(
+  String url, {
+  Map<String, dynamic>? headers,
+}) => WebSocket.connect(url, headers: headers);
+
 class GensokyoAiHttpRuntimeClient {
   GensokyoAiHttpRuntimeClient({
     required this.connection,
     HttpClient? httpClient,
     RuntimeEndpointPolicy endpointPolicy = const RuntimeEndpointPolicy(),
+    AppLogger? logger,
+    RuntimeWebSocketConnector? webSocketConnector,
   }) : _httpClient = httpClient ?? HttpClient(),
-       _endpointPolicy = endpointPolicy;
+       _endpointPolicy = endpointPolicy,
+       _logger = logger ?? AppLogger.instance,
+       _webSocketConnector = webSocketConnector ?? _defaultWebSocketConnector;
 
   final ExternalRuntimeConnectionSettings connection;
   final HttpClient _httpClient;
   final RuntimeEndpointPolicy _endpointPolicy;
+  final AppLogger _logger;
+  final RuntimeWebSocketConnector _webSocketConnector;
   final StreamController<ExternalRuntimeEvent> _events =
       StreamController<ExternalRuntimeEvent>.broadcast();
   final StreamController<bool> _connectionStates =
@@ -69,8 +84,15 @@ class GensokyoAiHttpRuntimeClient {
   }
 
   Future<void> _connect() async {
-    await negotiate();
-    await _ensureWebSocket();
+    await _logger.trace<void>(
+      'runtime.connect',
+      component: 'runtime',
+      data: _connectionLogData,
+      operation: () async {
+        await negotiate();
+        await _ensureWebSocket();
+      },
+    );
   }
 
   Future<Map<String, dynamic>> negotiate() async {
@@ -134,16 +156,47 @@ class GensokyoAiHttpRuntimeClient {
   );
 
   Future<Map<String, dynamic>> getJson(Uri uri) async {
-    final request = await _httpClient.getUrl(uri);
-    request.followRedirects = false;
-    _applyHeaders(request);
-    final response = await request.close();
-    final body = await utf8.decoder.bind(response).join();
-    final decoded = _decodeMap(body);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw _exceptionFromEnvelope(decoded, response.statusCode);
+    final stopwatch = Stopwatch()..start();
+    final data = <String, Object?>{
+      ..._connectionLogData,
+      'endpoint': _logger.safeUri(uri),
+    };
+    _logger.debug('runtime.http.started', component: 'runtime', data: data);
+    int? statusCode;
+    try {
+      final request = await _httpClient.getUrl(uri);
+      request.followRedirects = false;
+      _applyHeaders(request);
+      final response = await request.close();
+      statusCode = response.statusCode;
+      final body = await utf8.decoder.bind(response).join();
+      final decoded = _decodeMap(body);
+      if (statusCode < 200 || statusCode >= 300) {
+        throw _exceptionFromEnvelope(decoded, statusCode);
+      }
+      _logger.info(
+        'runtime.http.succeeded',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...data,
+          'status_code': statusCode,
+          'duration_ms': stopwatch.elapsedMilliseconds,
+        },
+      );
+      return decoded;
+    } catch (error) {
+      _logger.error(
+        'runtime.http.failed',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...data,
+          'status_code': ?statusCode,
+          'duration_ms': stopwatch.elapsedMilliseconds,
+        },
+        error: error,
+      );
+      rethrow;
     }
-    return decoded;
   }
 
   Future<dynamic> call(
@@ -156,30 +209,62 @@ class GensokyoAiHttpRuntimeClient {
         'HakureiTerminal only supports documented read-only world methods',
       );
     }
-    final preparedParams = _prepareParams(method, params);
-    final request = await _httpClient.postUrl(
-      _endpointPolicy.rpcUri(connection.baseUrl),
-    );
-    request.followRedirects = false;
-    _applyHeaders(request);
-    request.headers.contentType = ContentType.json;
-    final id = _requestId();
-    request.write(
-      jsonEncode(<String, dynamic>{
-        'id': id,
-        'method': method,
-        'params': preparedParams,
-      }),
-    );
-    final response = await request.close();
-    final body = await utf8.decoder.bind(response).join();
-    final envelope = _decodeMap(body);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw _exceptionFromEnvelope(envelope, response.statusCode);
+    final stopwatch = Stopwatch()..start();
+    final data = <String, Object?>{
+      ..._connectionLogData,
+      'method': method,
+      'endpoint': _logger.safeUri(_endpointPolicy.rpcUri(connection.baseUrl)),
+    };
+    _logger.debug('runtime.rpc.started', component: 'runtime', data: data);
+    int? statusCode;
+    try {
+      final preparedParams = _prepareParams(method, params);
+      final request = await _httpClient.postUrl(
+        _endpointPolicy.rpcUri(connection.baseUrl),
+      );
+      request.followRedirects = false;
+      _applyHeaders(request);
+      request.headers.contentType = ContentType.json;
+      final id = _requestId();
+      request.write(
+        jsonEncode(<String, dynamic>{
+          'id': id,
+          'method': method,
+          'params': preparedParams,
+        }),
+      );
+      final response = await request.close();
+      statusCode = response.statusCode;
+      final body = await utf8.decoder.bind(response).join();
+      final envelope = _decodeMap(body);
+      if (statusCode < 200 || statusCode >= 300) {
+        throw _exceptionFromEnvelope(envelope, statusCode);
+      }
+      final result = _resultFromEnvelope(envelope);
+      _recordResult(method, result);
+      _logger.info(
+        'runtime.rpc.succeeded',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...data,
+          'status_code': statusCode,
+          'duration_ms': stopwatch.elapsedMilliseconds,
+        },
+      );
+      return result;
+    } catch (error) {
+      _logger.error(
+        'runtime.rpc.failed',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...data,
+          'status_code': ?statusCode,
+          'duration_ms': stopwatch.elapsedMilliseconds,
+        },
+        error: error,
+      );
+      rethrow;
     }
-    final result = _resultFromEnvelope(envelope);
-    _recordResult(method, result);
-    return result;
   }
 
   Future<Map<String, dynamic>> renameSession({
@@ -242,13 +327,35 @@ class GensokyoAiHttpRuntimeClient {
     required Object message,
     String? idempotencyKey,
   }) async* {
+    final streamStopwatch = Stopwatch()..start();
+    final streamLogData = <String, Object?>{
+      ..._connectionLogData,
+      'session_ref': _logger.reference(sessionId),
+      'expected_revision': expectedRevision,
+      'message_kind': message is String ? 'text' : 'parts',
+      if (message is String) 'input_chars': message.length,
+      if (message is List) 'part_count': message.length,
+    };
     if ((message is String && message.isEmpty) ||
         (message is List && message.isEmpty)) {
+      _logger.warning(
+        'runtime.stream.rejected',
+        component: 'runtime',
+        data: <String, Object?>{...streamLogData, 'reason': 'empty_message'},
+      );
       yield const RuntimeStreamFailed(message: '消息不能为空');
       return;
     }
     final unresolved = _unresolvedMessageOperation;
     if (unresolved != null) {
+      _logger.warning(
+        'runtime.stream.rejected',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...streamLogData,
+          'reason': 'previous_operation_unresolved',
+        },
+      );
       yield RuntimeStreamFailed(
         message: '上一次发送的服务端状态尚未确认，请先刷新会话',
         metadata: <String, dynamic>{
@@ -269,6 +376,11 @@ class GensokyoAiHttpRuntimeClient {
     var reasoning = '';
     final toolEvents = <Map<String, dynamic>>[];
     var requestSubmitted = false;
+    _logger.info(
+      'runtime.stream.started',
+      component: 'runtime',
+      data: streamLogData,
+    );
     try {
       frames = await _openStream(id);
       _activeStreamRequestId = id;
@@ -311,6 +423,15 @@ class GensokyoAiHttpRuntimeClient {
           if (_activeStreamRequestId == id) {
             _activeStreamId = streamId;
           }
+          _logger.info(
+            'runtime.stream.acknowledged',
+            component: 'runtime',
+            data: <String, Object?>{
+              ...streamLogData,
+              'stream_ref': _logger.reference(streamId),
+              'generation_ref': _logger.reference(generationId),
+            },
+          );
           yield RuntimeStreamStarted(
             metadata: <String, dynamic>{
               'request_id': id,
@@ -355,6 +476,17 @@ class GensokyoAiHttpRuntimeClient {
             yield RuntimeStreamDelta(content, metadata: eventJson);
           } else if (type == 'cancelled') {
             _unresolvedMessageOperation = null;
+            _logger.info(
+              'runtime.stream.cancelled',
+              component: 'runtime',
+              data: <String, Object?>{
+                ...streamLogData,
+                'duration_ms': streamStopwatch.elapsedMilliseconds,
+                'partial_chars': partial.length,
+                'reasoning_chars': reasoning.length,
+                'tool_event_count': toolEvents.length,
+              },
+            );
             yield RuntimeStreamCancelled(
               partialContent: partial,
               partialReasoning: reasoning,
@@ -373,6 +505,17 @@ class GensokyoAiHttpRuntimeClient {
           final content = result['content'] is String
               ? result['content'] as String
               : partial;
+          _logger.info(
+            'runtime.stream.completed',
+            component: 'runtime',
+            data: <String, Object?>{
+              ...streamLogData,
+              'duration_ms': streamStopwatch.elapsedMilliseconds,
+              'output_chars': content.length,
+              'reasoning_chars': reasoning.length,
+              'tool_event_count': toolEvents.length,
+            },
+          );
           yield RuntimeStreamCompleted(
             RuntimeReply(
               content: content,
@@ -386,6 +529,18 @@ class GensokyoAiHttpRuntimeClient {
         }
       }
     } on RuntimeConnectionException catch (error) {
+      _logger.error(
+        'runtime.stream.failed',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...streamLogData,
+          'duration_ms': streamStopwatch.elapsedMilliseconds,
+          'request_submitted': requestSubmitted,
+          'partial_chars': partial.length,
+          if (error.code != null) 'error_code': error.code,
+        },
+        error: error,
+      );
       if (requestSubmitted) {
         yield await _recoverMessageOperation(
           operation,
@@ -407,6 +562,16 @@ class GensokyoAiHttpRuntimeClient {
         );
       }
     } on FormatException catch (error) {
+      _logger.error(
+        'runtime.stream.invalid_frame',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...streamLogData,
+          'duration_ms': streamStopwatch.elapsedMilliseconds,
+          'request_submitted': requestSubmitted,
+        },
+        error: error,
+      );
       _unresolvedMessageOperation = null;
       yield RuntimeStreamFailed(
         message: '服务响应格式无效',
@@ -543,6 +708,11 @@ class GensokyoAiHttpRuntimeClient {
   Future<void> dispose() => _disposeRequest ??= _dispose();
 
   Future<void> _dispose() async {
+    _logger.info(
+      'runtime.dispose.started',
+      component: 'runtime',
+      data: _connectionLogData,
+    );
     _disposed = true;
     final subscription = _webSocketSubscription;
     final socket = _webSocket;
@@ -563,6 +733,11 @@ class GensokyoAiHttpRuntimeClient {
     await _events.close();
     await _connectionStates.close();
     _httpClient.close(force: true);
+    _logger.info(
+      'runtime.dispose.completed',
+      component: 'runtime',
+      data: _connectionLogData,
+    );
   }
 
   Future<StreamController<Map<String, dynamic>>> _openStream(String id) async {
@@ -594,10 +769,35 @@ class GensokyoAiHttpRuntimeClient {
   }
 
   Future<void> _connectWebSocket() async {
-    final socket = await WebSocket.connect(
-      _endpointPolicy.webSocketUri(connection.baseUrl).toString(),
-      headers: runtimeAuthorizationHeaders(connection.authToken),
+    final endpoint = _endpointPolicy.webSocketUri(connection.baseUrl);
+    final stopwatch = Stopwatch()..start();
+    final data = <String, Object?>{
+      ..._connectionLogData,
+      'endpoint': _logger.safeUri(endpoint),
+    };
+    _logger.info(
+      'runtime.websocket.connecting',
+      component: 'runtime',
+      data: data,
     );
+    late final WebSocket socket;
+    try {
+      socket = await _webSocketConnector(
+        endpoint.toString(),
+        headers: runtimeAuthorizationHeaders(connection.authToken),
+      );
+    } catch (error) {
+      _logger.error(
+        'runtime.websocket.handshake_failed',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...data,
+          'duration_ms': stopwatch.elapsedMilliseconds,
+        },
+        error: error,
+      );
+      rethrow;
+    }
     if (_disposed) {
       await socket.close();
       throw StateError('Runtime client has been disposed');
@@ -609,12 +809,28 @@ class GensokyoAiHttpRuntimeClient {
         socket,
         const RuntimeConnectionException('连接已断开', recoverable: true),
       ),
-      onError: (Object _) => _handleWebSocketDisconnect(
-        socket,
-        const RuntimeConnectionException('连接失败', recoverable: true),
-      ),
+      onError: (Object error) {
+        _logger.error(
+          'runtime.websocket.transport_error',
+          component: 'runtime',
+          data: data,
+          error: error,
+        );
+        _handleWebSocketDisconnect(
+          socket,
+          const RuntimeConnectionException('连接失败', recoverable: true),
+        );
+      },
     );
     _connectionStates.add(true);
+    _logger.info(
+      'runtime.websocket.connected',
+      component: 'runtime',
+      data: <String, Object?>{
+        ...data,
+        'duration_ms': stopwatch.elapsedMilliseconds,
+      },
+    );
   }
 
   void _handleWebSocketFrame(dynamic raw) {
@@ -654,6 +870,15 @@ class GensokyoAiHttpRuntimeClient {
     _subscriptionRequest = null;
     _activeStreamRequestId = null;
     _activeStreamId = null;
+    _logger.warning(
+      'runtime.websocket.disconnected',
+      component: 'runtime',
+      data: <String, Object?>{
+        ..._connectionLogData,
+        if (socket.closeCode != null) 'close_code': socket.closeCode,
+      },
+      error: error,
+    );
     _failStreams(error);
     if (!_disposed) {
       _connectionStates.add(false);
@@ -683,6 +908,14 @@ class GensokyoAiHttpRuntimeClient {
     required List<int> bytes,
     required String contentType,
   }) async {
+    final stopwatch = Stopwatch()..start();
+    final logData = <String, Object?>{
+      ..._connectionLogData,
+      'endpoint': _logger.safeUri(uri),
+      'byte_count': bytes.length,
+      'content_type': contentType,
+    };
+    _logger.info('runtime.upload.started', component: 'runtime', data: logData);
     final safeFilename = filename.replaceAll(RegExp(r'[\r\n"]'), '_').trim();
     if (safeFilename.isEmpty) {
       throw ArgumentError.value(filename, 'filename', 'must not be empty');
@@ -705,19 +938,50 @@ class GensokyoAiHttpRuntimeClient {
     );
     request.add(bytes);
     request.add(utf8.encode('\r\n--$boundary--\r\n'));
-    final response = await request.close();
-    final body = await utf8.decoder.bind(response).join();
-    Map<String, dynamic> decoded;
+    int? statusCode;
     try {
-      decoded = _decodeMap(body);
-    } on FormatException {
-      decoded = <String, dynamic>{'message': body};
+      final response = await request.close();
+      statusCode = response.statusCode;
+      final body = await utf8.decoder.bind(response).join();
+      Map<String, dynamic> decoded;
+      try {
+        decoded = _decodeMap(body);
+      } on FormatException {
+        decoded = <String, dynamic>{'message': body};
+      }
+      if (statusCode < 200 || statusCode >= 300) {
+        throw _exceptionFromEnvelope(decoded, statusCode);
+      }
+      _logger.info(
+        'runtime.upload.succeeded',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...logData,
+          'status_code': statusCode,
+          'duration_ms': stopwatch.elapsedMilliseconds,
+        },
+      );
+      return decoded;
+    } catch (error) {
+      _logger.error(
+        'runtime.upload.failed',
+        component: 'runtime',
+        data: <String, Object?>{
+          ...logData,
+          'status_code': ?statusCode,
+          'duration_ms': stopwatch.elapsedMilliseconds,
+        },
+        error: error,
+      );
+      rethrow;
     }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw _exceptionFromEnvelope(decoded, response.statusCode);
-    }
-    return decoded;
   }
+
+  Map<String, Object?> get _connectionLogData => <String, Object?>{
+    'connection_ref': _logger.reference(connection.id),
+    'agent_ref': _logger.reference(connection.agentId),
+    'base_url': _logger.safeUri(connection.baseUrl),
+  };
 
   String _requestId() => 'hakurei-${_nextRequestId++}';
 
