@@ -4,10 +4,10 @@ HakureiTerminal 是独立部署的 GensokyoAI Agent v2 Runtime 的专用 Flutter
 
 ## Downloads
 
-当前公开版本为 [v0.0.1-pre.1 Pre-release](https://github.com/JO-Beacon/HakureiTerminal/releases/tag/v0.0.1-pre.1)：
+当前公开版本为 [v0.0.2](https://github.com/JO-Beacon/HakureiTerminal/releases/tag/v0.0.2)：
 
-- Windows x64：下载 `HakureiTerminal-0.0.1+1-windows-x64.zip`，解压后运行 `hakurei_terminal.exe`。
-- Android：下载 `HakureiTerminal-0.0.1+1-android-universal.apk`。该 Pre-release 使用 Android Debug 证书，仅适合测试安装。
+- Windows x64：下载 `HakureiTerminal-0.0.2+2-windows-x64.zip`，解压后运行 `hakurei_terminal.exe`。
+- Android arm64-v8a：下载 `HakureiTerminal-0.0.2+2-android-arm64-v8a.apk`。该 GitHub 直装包使用 Android Debug 证书，不是应用商店签名包。
 
 两个平台都需要用户自行部署并连接 GensokyoAI Runtime `2026.8.8.0`。
 
@@ -32,7 +32,7 @@ flowchart LR
 
 ## External Runtime Connection
 
-GensokyoAI 必须由用户或运维方在 HakureiTerminal 之外部署、配置 Provider、保护网络入口并启动。HakureiTerminal 没有本地安装入口。详细迁移步骤见 `docs/external-runtime-migration.md`。
+GensokyoAI 必须由用户或运维方在 HakureiTerminal 之外部署、配置 Provider、保护网络入口并启动。HakureiTerminal 没有本地安装入口。详细部署与连接说明见 `docs/external-runtime-setup.md`。
 
 当前连接流程如下：
 
@@ -74,11 +74,12 @@ GensokyoAI 必须由用户或运维方在 HakureiTerminal 之外部署、配置 
 Windows 的主要数据位置为 `%APPDATA%/HakureiTerminal/`；无法使用该位置时，开发 fallback 为仓库工作目录中的 `.hakurei_terminal/` 和 `.hakurei_terminal_settings.json`。
 
 - `settings.json` 包含模型 profile、文本模型和 TTS Provider API Key、外部 Runtime URL/token、委托状态、外观、快捷键和用户角色设置。
-- `assistants/` 中的客户端创作内容是非可执行角色草稿；`conversations/` 中的旧本地会话、消息和上下文是惰性遗留数据或一次性展示缓存；`media/` 保存内容寻址媒体。它们都不是 GensokyoAI 执行状态。
-- `logs/` 用于本地 `.log` 文件。数据管理页只统计或删除该目录中的 `.log`，不删除设置或存档。
+- `assistants/` 中的客户端创作内容是非可执行角色草稿；`conversations/` 保存远端会话的一次性展示缓存；`media/` 保存内容寻址媒体。它们都不是 GensokyoAI 执行状态。
+- `logs/` 保存 HakureiTerminal 自动写入的结构化 JSON Lines 诊断日志。日志按单文件 2 MiB、最多 5 个文件轮转；“设置 -> 数据管理 -> 日志管理”可刷新统计、打开目录、导出诊断 ZIP 或清除日志，不会删除设置或存档。
+- 日志只记录经过脱敏的事件、状态、耗时、计数和资源哈希，不记录 token、API Key、认证头、URL 查询、请求或响应正文、消息/推理/工具内容、TTS 输入、角色草稿、设置/存档内容或未脱敏本地路径。诊断 ZIP 只包含 `.log` 文件和清单；公开分享前仍应检查内容。
 - 完整 `.jovarchive` 包含 `settings/settings.json`，因此包含 Provider API Key 和 Runtime token。导出前会显示敏感凭据提示；不要公开分享归档。
 - 导入在本地解析、校验白名单路径和媒体 SHA-256，不联系 Provider 或 Runtime。恢复的外部连接保持断开，直到用户再次明确操作。
-- `.jovarchive` 不包含 GensokyoAI 服务端权威的完整角色、会话、消息、上下文、记忆、场景、工具、定时器或配置。归档内的旧本地会话和 Runtime 数据保持惰性，不会自动映射或上传；删除本地连接或本地存档不会删除外部 Runtime 上的数据。
+- `.jovarchive` 不包含 GensokyoAI 服务端权威的完整角色、会话、消息、上下文、记忆、场景、工具、定时器或配置；删除本地连接、展示缓存或本地存档不会删除外部 Runtime 上的数据。
 
 更多数据处理信息见 `PRIVACY.md`，安全报告方式见 `SECURITY.md`。
 
@@ -91,7 +92,7 @@ Windows 的主要数据位置为 `%APPDATA%/HakureiTerminal/`；无法使用该�
 - 独立 GensokyoAI Runtime 的外部角色、分页历史、流式 Agent 消息、可恢复事件、语义记忆、场景、主动定时器和图片消息接入。
 - Markdown 消息渲染、代码块复制和独立 TTS Provider 消息朗读。
 - GensokyoWorld 能力探测及 World 状态、花名册、共享剧本和存档的只读显示。
-- 本地存储与日志统计、安全清理。
+- 自动轮转的结构化诊断日志、脱敏诊断 ZIP 导出与安全清理。
 
 客户端版本唯一来源是 `pubspec.yaml` 的 `version` 字段。该版本不代表外部 Runtime 版本；连接测试读取 GensokyoAI 返回的 `package_version` 和协议版本。
 

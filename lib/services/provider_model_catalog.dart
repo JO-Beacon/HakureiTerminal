@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'app_logger.dart';
+
 class ProviderModelCatalogEntry {
   const ProviderModelCatalogEntry({
     required this.id,
@@ -35,13 +37,17 @@ abstract interface class ProviderModelCatalog {
 }
 
 class HttpProviderModelCatalog implements ProviderModelCatalog {
-  HttpProviderModelCatalog({HttpClient Function()? httpClientFactory})
-    : _httpClientFactory = httpClientFactory ?? HttpClient.new;
+  HttpProviderModelCatalog({
+    HttpClient Function()? httpClientFactory,
+    AppLogger? logger,
+  }) : _httpClientFactory = httpClientFactory ?? HttpClient.new,
+       _logger = logger ?? AppLogger.instance;
 
   static const int _maxResponseBytes = 10 * 1024 * 1024;
   static const int _maxPages = 100;
 
   final HttpClient Function() _httpClientFactory;
+  final AppLogger _logger;
 
   @override
   Future<List<ProviderModelCatalogEntry>> listModels({
@@ -50,6 +56,31 @@ class HttpProviderModelCatalog implements ProviderModelCatalog {
     required String apiKey,
     Duration timeout = const Duration(seconds: 30),
     bool useProxy = false,
+  }) => _logger.trace<List<ProviderModelCatalogEntry>>(
+    'provider.models.list',
+    component: 'provider_catalog',
+    data: <String, Object?>{
+      'provider': provider,
+      'base_url': _logger.safeUri(baseUrl),
+      'timeout_ms': timeout.inMilliseconds,
+      'use_proxy': useProxy,
+      'credential_configured': apiKey.trim().isNotEmpty,
+    },
+    operation: () => _listModels(
+      provider: provider,
+      baseUrl: baseUrl,
+      apiKey: apiKey,
+      timeout: timeout,
+      useProxy: useProxy,
+    ),
+  );
+
+  Future<List<ProviderModelCatalogEntry>> _listModels({
+    required String provider,
+    required String baseUrl,
+    required String apiKey,
+    required Duration timeout,
+    required bool useProxy,
   }) async {
     final normalizedProvider = _normalizeProvider(provider);
     final base = _normalizeBaseUrl(baseUrl);

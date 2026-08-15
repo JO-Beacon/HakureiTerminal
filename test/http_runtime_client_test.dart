@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hakurei_terminal/models/app_settings.dart';
+import 'package:hakurei_terminal/services/app_logger.dart';
 import 'package:hakurei_terminal/services/runtime/http_runtime_client.dart';
 import 'package:hakurei_terminal/services/runtime/runtime_connection.dart';
 import 'package:hakurei_terminal/services/runtime/runtime_stream_event.dart';
@@ -20,6 +21,10 @@ void main() {
       expect(
         policy.webSocketUri('http://127.0.0.1:8765').toString(),
         'ws://127.0.0.1:8765/ws',
+      );
+      expect(
+        policy.webSocketUri('https://runtime.example/api').toString(),
+        'wss://runtime.example/api/ws',
       );
       expect(
         policy.readinessUri('https://runtime.example/api').toString(),
@@ -511,6 +516,53 @@ void main() {
       ]);
 
       await (await socketReady).close();
+    });
+
+    test('logs a redacted WebSocket handshake failure', () async {
+      final serverPort = server.port;
+      final directory = await Directory.systemTemp.createTemp(
+        'hakurei_runtime_log_test_',
+      );
+      final logger = AppLogger();
+      await logger.initialize(directory);
+      await client.dispose();
+      client = GensokyoAiHttpRuntimeClient(
+        connection: ExternalRuntimeConnectionSettings(
+          id: 'runtime-1',
+          agentId: 'agent-runtime-1',
+          displayName: 'Fixture',
+          baseUrl: 'http://127.0.0.1:$serverPort',
+          authToken: 'runtime-token-must-not-be-logged',
+        ),
+        logger: logger,
+        webSocketConnector: (url, {headers}) async {
+          expect(url, 'ws://127.0.0.1:$serverPort/ws');
+          expect(
+            headers?[HttpHeaders.authorizationHeader],
+            'Bearer runtime-token-must-not-be-logged',
+          );
+          throw const HandshakeException('TLS certificate rejected');
+        },
+      );
+      unawaited(
+        _serveOnce(server, (request) async {
+          final payload =
+              jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+          await _writeRpcResult(request, payload['id'], _runtimeInfoV2);
+        }),
+      );
+
+      await expectLater(client.connect(), throwsA(isA<HandshakeException>()));
+      await logger.flush();
+
+      final logs = await logger.activeFile!.readAsString();
+      expect(logs, contains('runtime.websocket.handshake_failed'));
+      expect(logs, contains('TLS certificate rejected'));
+      expect(logs, contains('ws://127.0.0.1:$serverPort/ws'));
+      expect(logs, isNot(contains('runtime-token-must-not-be-logged')));
+      await client.dispose();
+      await logger.flush();
+      await directory.delete(recursive: true);
     });
 
     test(

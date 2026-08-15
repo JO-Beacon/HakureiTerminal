@@ -13,6 +13,7 @@ import 'package:hakurei_terminal/models/chat_message.dart';
 import 'package:hakurei_terminal/models/chat_session.dart';
 import 'package:hakurei_terminal/repositories/archive_repositories.dart';
 import 'package:hakurei_terminal/screens/settings_screen.dart';
+import 'package:hakurei_terminal/services/app_logger.dart';
 import 'package:hakurei_terminal/services/provider_model_catalog.dart';
 import 'package:hakurei_terminal/services/runtime/external_agent_runtime.dart';
 import 'package:hakurei_terminal/services/runtime/external_runtime_event.dart';
@@ -1126,6 +1127,42 @@ void main() {
     );
   });
 
+  testWidgets('storage settings expose structured log management', (
+    tester,
+  ) async {
+    final temp = Directory.systemTemp.createTempSync('hakurei_logs_ui_');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(
+          initialSettings: AppSettings.defaultSettings,
+          initialPage: SettingsInitialPage.storage,
+          assistantRepository: AssistantArchiveRepository(
+            paths: ArchivePaths(root: temp),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.scrollUntilVisible(
+      find.text('日志管理'),
+      500,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const ValueKey<String>('storageSettingsPage')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+
+    expect(find.text('日志管理'), findsOneWidget);
+    expect(find.text('导出诊断日志'), findsOneWidget);
+    expect(find.textContaining('日志采用 JSON Lines'), findsOneWidget);
+    expect(find.textContaining('最多保留 5 个文件'), findsOneWidget);
+    expect(find.textContaining('不包含设置、凭据、消息正文或模型输入'), findsOneWidget);
+  });
+
   testWidgets('GensokyoAI settings expose 2.2 initiative and memory add', (
     tester,
   ) async {
@@ -1646,6 +1683,68 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Runtime connection dialog explains HTTP and WebSocket URLs', (
+    tester,
+  ) async {
+    final temp = Directory.systemTemp.createTempSync(
+      'hakurei_runtime_url_help_',
+    );
+    addTearDown(() => temp.deleteSync(recursive: true));
+    final paths = ArchivePaths(root: temp);
+    final logger = _RecordingAppLogger();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(
+          initialSettings: AppSettings.defaultSettings,
+          initialPage: SettingsInitialPage.backend,
+          assistantRepository: AssistantArchiveRepository(paths: paths),
+          conversationRepository: ConversationArchiveRepository(paths: paths),
+          logger: logger,
+        ),
+      ),
+    );
+    await tester.pump();
+    tester
+        .widget<OutlinedButton>(
+          find.byKey(const ValueKey<String>('addExternalRuntimeConnection')),
+        )
+        .onPressed!
+        .call();
+    await tester.pumpAndSettle();
+
+    final urlField = find.byKey(
+      const ValueKey<String>('externalRuntimeUrlField'),
+    );
+    expect(find.text('Runtime 根地址（HTTP/HTTPS）'), findsOneWidget);
+    expect(find.textContaining('不要填写 ws://、wss://'), findsOneWidget);
+    expect(find.text('WebSocket 地址会由客户端自动生成。'), findsOneWidget);
+
+    await tester.enterText(urlField, 'wss://127.0.0.1:8765');
+    await tester.tap(find.widgetWithText(FilledButton, '保存'));
+    await tester.pump();
+
+    expect(
+      find.text('请填写 HTTP/HTTPS 根地址，不要填写 ws:// 或 wss://。'),
+      findsOneWidget,
+    );
+    expect(find.byType(AlertDialog), findsOneWidget);
+
+    await tester.enterText(urlField, 'http://127.0.0.1:8765');
+    await tester.pump();
+
+    expect(find.text('WebSocket 将自动连接：ws://127.0.0.1:8765/ws'), findsOneWidget);
+    expect(find.text('请填写 HTTP/HTTPS 根地址，不要填写 ws:// 或 wss://。'), findsNothing);
+
+    await tester.tap(find.widgetWithText(FilledButton, '保存'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final logText = jsonEncode(logger.events);
+    expect(logText, contains('runtime.connection_profile.validation_rejected'));
+    expect(logText, contains('runtime.connection_profile.validated'));
+    expect(logText, isNot(contains('wss://127.0.0.1:8765')));
+  });
+
   testWidgets('settings session management loads read-only Runtime state', (
     tester,
   ) async {
@@ -1943,5 +2042,38 @@ class _SceneDisabledExternalAgentRuntime
   @override
   Future<Map<String, dynamic>> currentScene() async {
     throw StateError('Scene system is not enabled');
+  }
+}
+
+class _RecordingAppLogger extends AppLogger {
+  final List<Map<String, Object?>> events = <Map<String, Object?>>[];
+
+  @override
+  void info(
+    String event, {
+    required String component,
+    Map<String, Object?> data = const <String, Object?>{},
+  }) {
+    events.add(<String, Object?>{
+      'level': 'info',
+      'event': event,
+      'component': component,
+      'data': data,
+    });
+  }
+
+  @override
+  void warning(
+    String event, {
+    required String component,
+    Map<String, Object?> data = const <String, Object?>{},
+    Object? error,
+  }) {
+    events.add(<String, Object?>{
+      'level': 'warning',
+      'event': event,
+      'component': component,
+      'data': data,
+    });
   }
 }

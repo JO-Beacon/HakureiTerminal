@@ -4,7 +4,7 @@ This document describes HakureiTerminal's data handling. An independently operat
 
 ## Local Data
 
-HakureiTerminal stores application settings, non-executable client-authored character drafts, user roles, disposable remote display caches, legacy inert conversations/runtime records, appearance settings, media, external connection definitions, and diagnostic logs on the device. GensokyoAI `2026.8.8.0`, not this local data, is the sole authority for executable characters, sessions, messages, context, memory, scenes, tools, timers, and generation state.
+HakureiTerminal stores application settings, non-executable client-authored character drafts, user roles, disposable remote display caches, appearance settings, media, external connection definitions, and diagnostic logs on the device. GensokyoAI `2026.8.8.0`, not this local data, is the sole authority for executable characters, sessions, messages, context, memory, scenes, tools, timers, and generation state.
 
 On Windows, the normal data root is `%APPDATA%/HakureiTerminal/`. Development or platform fallback locations may include `.hakurei_terminal/` and `.hakurei_terminal_settings.json` in the current working directory. Media is stored by SHA-256 content hash. The application does not implement a HakureiTerminal-operated analytics or account service.
 
@@ -38,26 +38,28 @@ Saving a connection and opening the application do not make a request. Testing, 
 
 ## Archives
 
-A full `.jovarchive` includes `settings/settings.json`. It therefore includes Provider API keys, Runtime bearer tokens, Runtime URLs, inert legacy conversations, non-executable character drafts, user profile information, and referenced media. Treat every full archive as a sensitive credential backup:
+A full `.jovarchive` includes `settings/settings.json`. It therefore includes Provider API keys, Runtime bearer tokens, Runtime URLs, disposable remote display caches, non-executable character drafts, user profile information, and referenced media. Treat every full archive as a sensitive credential backup:
 
 - Do not publish it, attach it to a public issue, or send it through an untrusted channel.
 - Store and transfer it with access controls appropriate for API keys.
-- Import validates the archive locally and does not upload, migrate, synchronize, or auto-map its contents. Legacy local conversations and Runtime records remain inert.
+- Import validates the archive locally and does not upload, synchronize, or auto-map its contents to a Runtime.
 - Import restores credentials but leaves external connections disconnected and clears Provider delegation until the user explicitly configures them again.
 
 ## Logs And Diagnostics
 
-HakureiTerminal maps Runtime failures to stable error categories and does not intentionally log bearer tokens, Provider API keys, authentication headers, or complete sensitive Runtime responses. Do not assume every log or screenshot is harmless: conversation text, file paths, server hostnames, identifiers, and user-enabled request-payload diagnostics can still be sensitive. Review and redact diagnostic material before sharing it.
+HakureiTerminal automatically writes structured JSON Lines diagnostic logs on the device. Events can include application and feature lifecycle stages, sanitized endpoint scheme/host/port/path, HTTP or RPC status, elapsed time, byte or item counts, boolean configuration state, and truncated SHA-256 references. Resource references are diagnostic correlations and are not authoritative application or Runtime state.
 
-The data management page can inspect and delete `.log` files in HakureiTerminal's log directory. It does not control logs written by an independently deployed Runtime, reverse proxy, or Provider.
+The shared logger removes URL credentials, query strings, fragments, authentication headers, bearer values, API keys, and sensitive-key values. It does not record request or response bodies, prompts, messages, reasoning, tool arguments or results, TTS input text, character draft content, settings payloads, archive contents, or unredacted local filesystem paths. Unknown exception details are omitted; known transport and protocol errors are reduced to safe summaries. Logging failures do not change application behavior.
+
+Logs rotate at 2 MiB per file with at most five files retained. The data management page can refresh statistics, open the desktop log directory, clear HakureiTerminal logs, or export a diagnostics ZIP containing only `.log` files and `manifest.json`. Clearing writes a new audit event, so one newly created log file can remain. Export and deletion affect only HakureiTerminal-managed logs, not logs written by an independently deployed Runtime, reverse proxy, or Provider.
+
+The diagnostics exporter is designed to exclude credentials and content, but sanitized server hostnames, route paths, timing, platform/version data, and operational metadata can still be sensitive. Review every ZIP before sharing it and do not publish private infrastructure details.
 
 ## Deletion
 
-Deleting a local draft, cache, legacy conversation, media item, model profile, connection, log, or application data removes only the selected HakureiTerminal-managed copy. It does not delete:
+Deleting a local draft, display cache, media item, model profile, connection, log, or application data removes only the selected HakureiTerminal-managed copy. It does not delete:
 
 - Data already sent to or retained by a model Provider.
 - GensokyoAI-owned sessions, messages, characters, memory, scenes, tools, timers, configuration, or logs.
 - Existing `.jovarchive` exports or other filesystem/cloud backups.
-- Old local Runtime directories left by an earlier HakureiTerminal version.
-
-Use the external service's documented controls or contact its operator for external deletion. Delete old archives and backups separately. See `docs/external-runtime-migration.md` before removing legacy local Runtime data.
+Use the external service's documented controls or contact its operator for external deletion. Delete old archives and backups separately.
