@@ -15,9 +15,12 @@ import 'models/assistant.dart';
 import 'models/avatar_transform.dart';
 import 'models/chat_message.dart';
 import 'models/chat_session.dart';
+import 'models/local_account.dart';
 import 'models/runtime_capabilities.dart';
+import 'repositories/account_repository.dart';
 import 'repositories/archive_repositories.dart';
 import 'repositories/media_repository.dart';
+import 'screens/community_screen.dart';
 import 'screens/settings_screen.dart';
 import 'services/runtime/assistant_provider_adapters.dart';
 import 'services/runtime/external_runtime_event.dart';
@@ -236,10 +239,18 @@ Future<void> main() async {
       themeId: defaultThemeIdForPlatformBrightness(platformBrightness),
     ),
   );
+  final accountRepository = AccountRepository(globalPaths: archivePaths);
+  final activeAccount = await accountRepository.ensureActiveAccount();
+  final accountPaths = archivePaths.forAccount(activeAccount.id);
   runApp(
     HakureiTerminalApp(
-      archivePaths: archivePaths,
-      settingsStore: SettingsStore(defaultSettings: initialSettings),
+      archivePaths: accountPaths,
+      globalPaths: archivePaths,
+      accountRepository: accountRepository,
+      settingsStore: SettingsStore(
+        file: accountPaths.settingsFile,
+        defaultSettings: initialSettings,
+      ),
       initialSettings: initialSettings,
     ),
   );
@@ -379,6 +390,8 @@ class HakureiTerminalApp extends StatefulWidget {
     this.controller,
     this.settingsStore,
     this.archivePaths,
+    this.globalPaths,
+    this.accountRepository,
     this.assistantRepository,
     this.conversationRepository,
     this.initialSettings = AppSettings.defaultSettings,
@@ -389,6 +402,8 @@ class HakureiTerminalApp extends StatefulWidget {
   final ChatScreenController? controller;
   final SettingsStore? settingsStore;
   final ArchivePaths? archivePaths;
+  final ArchivePaths? globalPaths;
+  final AccountRepository? accountRepository;
   final AssistantArchiveRepository? assistantRepository;
   final ConversationArchiveRepository? conversationRepository;
   final AppSettings initialSettings;
@@ -498,6 +513,8 @@ class _HakureiTerminalAppState extends State<HakureiTerminalApp>
         controller: widget.controller,
         settingsStore: _settingsStore,
         archivePaths: _archivePaths,
+        globalPaths: widget.globalPaths,
+        accountRepository: widget.accountRepository,
         assistantRepository: widget.assistantRepository,
         conversationRepository: widget.conversationRepository,
         initialSettings: widget.initialSettings,
@@ -516,6 +533,8 @@ class ChatScreen extends StatefulWidget {
     this.controller,
     this.settingsStore,
     this.archivePaths,
+    this.globalPaths,
+    this.accountRepository,
     this.assistantRepository,
     this.conversationRepository,
     this.initialSettings = AppSettings.defaultSettings,
@@ -528,6 +547,8 @@ class ChatScreen extends StatefulWidget {
   final ChatScreenController? controller;
   final SettingsStore? settingsStore;
   final ArchivePaths? archivePaths;
+  final ArchivePaths? globalPaths;
+  final AccountRepository? accountRepository;
   final AssistantArchiveRepository? assistantRepository;
   final ConversationArchiveRepository? conversationRepository;
   final AppSettings initialSettings;
@@ -539,6 +560,15 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+class _AccountMenuSelection {
+  const _AccountMenuSelection.select(this.accountId) : isManage = false;
+
+  const _AccountMenuSelection.manage() : accountId = '', isManage = true;
+
+  final String accountId;
+  final bool isManage;
+}
+
 class _ChatScreenState extends State<ChatScreen> {
   GensokyoAiHttpRuntimeClient? _externalRuntimeClient;
   RuntimeConversationController? _conversationController;
@@ -546,10 +576,15 @@ class _ChatScreenState extends State<ChatScreen> {
       RuntimeConversationSnapshot.disconnected();
   StreamSubscription<RuntimeConversationSnapshot>?
   _conversationSnapshotSubscription;
-  late final SettingsStore _settingsStore;
-  late final AssistantArchiveRepository _assistantArchiveRepository;
-  late final ConversationArchiveRepository _conversationArchiveRepository;
-  late final MediaRepository _mediaRepository;
+  late SettingsStore _settingsStore;
+  late AssistantArchiveRepository _assistantArchiveRepository;
+  late ConversationArchiveRepository _conversationArchiveRepository;
+  late MediaRepository _mediaRepository;
+  AccountRepository? _accountRepository;
+  ArchivePaths? _globalPaths;
+  List<LocalAccount> _accounts = const <LocalAccount>[];
+  String? _activeAccountId;
+  bool _accountBusy = false;
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _messageFocusNode = FocusNode();
   final ScrollController _scrollController = ScrollController();
@@ -676,11 +711,16 @@ class _ChatScreenState extends State<ChatScreen> {
     _mediaRepository = MediaRepository(
       paths: _conversationArchiveRepository.paths,
     );
+    _accountRepository = widget.accountRepository;
+    _globalPaths = widget.globalPaths;
     if (widget.skipInitialLoad) {
       _loading = false;
       _sessionsLoaded = true;
     } else {
       _loadSettingsAndSessions();
+    }
+    if (_accountRepository != null) {
+      unawaited(_loadAccounts());
     }
   }
 
@@ -796,6 +836,107 @@ class _ChatScreenState extends State<ChatScreen> {
     await _settingsStore.save(migrated);
     await source.delete();
     return migrated;
+  }
+
+  LocalAccount? get _activeAccount {
+    for (final account in _accounts) {
+      if (account.id == _activeAccountId) {
+        return account;
+      }
+    }
+    return _accounts.isEmpty ? null : _accounts.first;
+  }
+
+  Future<void> _loadAccounts() async {
+    final repository = _accountRepository;
+    if (repository == null) {
+      return;
+    }
+    try {
+      final accounts = await repository.listAccounts();
+      final activeId = await repository.activeAccountId();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _accounts = accounts;
+        _activeAccountId = activeId;
+      });
+    } catch (error) {
+      AppLogger.instance.warning(
+        'accounts.list_failed',
+        component: 'application',
+        error: error,
+      );
+    }
+  }
+
+  Future<void> _switchAccount(String accountId) async {
+    final repository = _accountRepository;
+    final globalPaths = _globalPaths;
+    if (repository == null || globalPaths == null) {
+      return;
+    }
+    if (accountId == _activeAccountId || _accountBusy || _conversationBusy) {
+      return;
+    }
+    setState(() => _accountBusy = true);
+    try {
+      await repository.setActiveAccount(accountId);
+      await _deactivateExternalRuntime();
+      final accountPaths = globalPaths.forAccount(accountId);
+      _settingsStore = SettingsStore(
+        file: accountPaths.settingsFile,
+        defaultSettings: widget.initialSettings,
+      );
+      _assistantArchiveRepository = AssistantArchiveRepository(
+        paths: accountPaths,
+      );
+      _conversationArchiveRepository = ConversationArchiveRepository(
+        paths: accountPaths,
+      );
+      _mediaRepository = MediaRepository(
+        paths: _conversationArchiveRepository.paths,
+      );
+      await _loadAccounts();
+      await _reloadForAccountSwitch();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '切换账户失败：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _accountBusy = false);
+      }
+    }
+  }
+
+  Future<void> _reloadForAccountSwitch() async {
+    try {
+      var settings = await _settingsStore.load();
+      settings = await _migrateGlobalBackground(settings);
+      if (!mounted) {
+        return;
+      }
+      widget.onSettingsChanged?.call(settings);
+      setState(() {
+        _settings = settings;
+        _sessions = const <ChatSession>[];
+        _selectedSession = null;
+        _sessionMessages.clear();
+        _assistants = const <Assistant>[];
+        _error = null;
+        _syncNotice = null;
+        _sessionListError = null;
+        _externalBackendAvailable = false;
+      });
+      await _loadAssistants();
+      await _loadSessions();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _sessionListError ??= '账户数据加载失败：$error');
+      }
+    }
   }
 
   Future<bool> _loadAssistants() async {
@@ -2104,6 +2245,15 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  Future<void> _openCommunity() async {
+    if (_conversationBusy) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => CommunityScreen(activeAccount: _activeAccount),
+      ),
+    );
+  }
+
   Future<void> _openSettings({SettingsInitialPage? initialPage}) async {
     if (_conversationBusy) return;
     final saved = await Navigator.of(context).push<AppSettings>(
@@ -2121,6 +2271,10 @@ class _ChatScreenState extends State<ChatScreen> {
               _externalRuntimeClient == null || !_externalBackendAvailable
               ? null
               : GensokyoAiHttpRuntimeFacade(_externalRuntimeClient!),
+          accountRepository: _accountRepository,
+          activeAccountId: _activeAccountId,
+          onAccountSwitched: _accountRepository == null ? null : _switchAccount,
+          onAccountsChanged: _accountRepository == null ? null : _loadAccounts,
           onOperation: _applySettingsOperation,
           onActivateExternalRuntime: _activateExternalRuntimeFacade,
           onDeactivateExternalRuntime: _deactivateExternalRuntime,
@@ -2568,6 +2722,126 @@ class _ChatScreenState extends State<ChatScreen> {
     return width.clamp(_minPaneWidth, maxWidth);
   }
 
+  Widget _buildAccountHeader(BuildContext context) {
+    final account = _activeAccount;
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 2),
+      child: Material(
+        color: colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          key: const ValueKey<String>('accountSwitcher'),
+          borderRadius: BorderRadius.circular(8),
+          onTap: _accountBusy ? null : _showAccountMenu,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            child: Row(
+              children: <Widget>[
+                const CircleAvatar(
+                  radius: 16,
+                  child: Icon(Icons.person_outline, size: 18),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        account?.displayName.isEmpty == true
+                            ? '未命名账户'
+                            : account!.displayName,
+                        style: Theme.of(context).textTheme.titleSmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        '点击切换本地账户',
+                        style: Theme.of(context).textTheme.bodySmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.swap_horiz_outlined),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showAccountMenu() async {
+    final repository = _accountRepository;
+    if (repository == null) {
+      return;
+    }
+    await _loadAccounts();
+    if (!mounted) {
+      return;
+    }
+    final selection = await showDialog<_AccountMenuSelection>(
+      context: context,
+      builder: (context) {
+        return SimpleDialog(
+          title: const Text('切换本地账户'),
+          children: <Widget>[
+            for (final account in _accounts)
+              SimpleDialogOption(
+                key: ValueKey<String>('accountOption_${account.id}'),
+                onPressed: () => Navigator.pop(
+                  context,
+                  _AccountMenuSelection.select(account.id),
+                ),
+                child: Row(
+                  children: <Widget>[
+                    Icon(
+                      account.id == _activeAccountId
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_off,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        account.displayName.isEmpty
+                            ? '未命名账户'
+                            : account.displayName,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const Divider(),
+            SimpleDialogOption(
+              key: const ValueKey<String>('accountManageAction'),
+              onPressed: () =>
+                  Navigator.pop(context, _AccountMenuSelection.manage()),
+              child: const Row(
+                children: <Widget>[
+                  Icon(Icons.manage_accounts_outlined, size: 18),
+                  SizedBox(width: 10),
+                  Text('管理账户'),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    if (selection == null || !mounted) {
+      return;
+    }
+    if (selection.isManage) {
+      await _openSettings(initialPage: SettingsInitialPage.accounts);
+    } else if (selection.accountId.isNotEmpty) {
+      await _switchAccount(selection.accountId);
+    }
+  }
+
   Widget _buildSidebar(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return Material(
@@ -2576,14 +2850,12 @@ class _ChatScreenState extends State<ChatScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           Padding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
             child: Card(
               elevation: 0,
-              margin: const EdgeInsets.all(4),
+              margin: EdgeInsets.zero,
               child: Padding(
-                // Card 默认外边距为 4px；配合这里的 4px 内顶部距，
-                // 让标题行距离面板上边缘正好为 8px。
-                padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+                padding: const EdgeInsets.fromLTRB(0, 8, 0, 10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
@@ -2666,7 +2938,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 : _sessions.isEmpty
                 ? _buildEmptySessionState(context)
                 : ReorderableListView.builder(
-                    padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
                     buildDefaultDragHandles: false,
                     itemCount: _sessions.length,
                     onReorderItem: _reorderSessions,
@@ -2732,8 +3004,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
           ),
           const Divider(height: 1),
+          if (_accountRepository != null && _accounts.isNotEmpty)
+            _buildAccountHeader(context),
           Padding(
-            padding: const EdgeInsets.all(6),
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
             child: Row(
               children: <Widget>[
                 Expanded(
@@ -2756,6 +3030,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
                 const SizedBox(width: 8),
+                IconButton.filledTonal(
+                  key: const ValueKey<String>('openCommunityButton'),
+                  tooltip: '社区',
+                  onPressed: _conversationBusy ? null : _openCommunity,
+                  icon: const Icon(Icons.groups_outlined),
+                ),
+                const SizedBox(width: 4),
                 IconButton.filledTonal(
                   key: const ValueKey<String>('openSettingsButton'),
                   tooltip: '打开设置',
@@ -3512,15 +3793,13 @@ class _ChatScreenState extends State<ChatScreen> {
       color: Theme.of(context).colorScheme.surfaceContainerLow,
       child: ListView(
         key: const ValueKey<String>('contextPaneListView'),
-        padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
         children: <Widget>[
           Card(
             elevation: 0,
-            margin: const EdgeInsets.all(4),
+            margin: EdgeInsets.zero,
             child: Padding(
-              // Card 默认外边距为 4px；配合这里的 4px 内顶部距，
-              // 让标题行距离面板上边缘正好为 8px。
-              padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+              padding: const EdgeInsets.fromLTRB(0, 8, 0, 10),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
@@ -3890,8 +4169,9 @@ class _ContextDetailCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       elevation: 0,
+      margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.fromLTRB(0, 10, 0, 10),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[

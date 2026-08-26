@@ -14,6 +14,8 @@ import '../models/app_settings.dart';
 import '../models/runtime_identity.dart';
 import '../models/assistant.dart';
 import '../models/chat_session.dart';
+import '../models/local_account.dart';
+import '../repositories/account_repository.dart';
 import '../repositories/archive_repositories.dart';
 import '../repositories/media_repository.dart';
 import '../services/runtime/external_agent_runtime.dart';
@@ -34,6 +36,7 @@ enum SettingsInitialPage {
   tts,
   sessionDefaults,
   userProfile,
+  accounts,
   assistantManagement,
   gensokyoAi,
   shortcuts,
@@ -91,6 +94,10 @@ class SettingsScreen extends StatefulWidget {
     this.mediaRepository,
     this.providerModelCatalog,
     this.logger,
+    this.accountRepository,
+    this.activeAccountId,
+    this.onAccountSwitched,
+    this.onAccountsChanged,
     this.onSettingsChanged,
     this.onOperation,
     this.onActivateExternalRuntime,
@@ -110,6 +117,10 @@ class SettingsScreen extends StatefulWidget {
   final MediaRepository? mediaRepository;
   final ProviderModelCatalog? providerModelCatalog;
   final AppLogger? logger;
+  final AccountRepository? accountRepository;
+  final String? activeAccountId;
+  final Future<void> Function(String accountId)? onAccountSwitched;
+  final Future<void> Function()? onAccountsChanged;
   final ValueChanged<AppSettings>? onSettingsChanged;
   final Future<void> Function(SettingsOperation operation)? onOperation;
   final Future<ExternalAgentRuntime> Function(
@@ -205,6 +216,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _selectedUserRoleId;
   int _userRoleCounter = 0;
   bool _userRoleEditing = false;
+  List<LocalAccount> _accounts = const <LocalAccount>[];
+  String? _activeAccountId;
+  bool _accountsLoading = false;
+  bool _accountBusy = false;
 
   ExternalAgentRuntime? _externalAgentRuntime;
   String? _activeExternalRuntimeConnectionId;
@@ -395,6 +410,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _loadLogData();
     if (_selectedPage == _SettingsPage.storage) {
       unawaited(_loadMediaData());
+    }
+    _activeAccountId = widget.activeAccountId;
+    if (widget.accountRepository != null) {
+      unawaited(_loadAccounts());
     }
   }
 
@@ -708,6 +727,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             _buildSettingsListTile(
               themedContext,
+              page: _SettingsPage.accounts,
+              icon: Icons.manage_accounts_outlined,
+              title: '账户管理',
+              subtitle: '本地账户与切换',
+              showSelection: !fullWidth,
+            ),
+            _buildSettingsListTile(
+              themedContext,
               page: _SettingsPage.assistantManagement,
               icon: Icons.groups_2_outlined,
               title: '角色管理',
@@ -801,6 +828,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return _buildSessionDefaultsPage();
       case _SettingsPage.userProfile:
         return _buildUserProfilePage();
+      case _SettingsPage.accounts:
+        return _buildAccountsPage();
       case _SettingsPage.shortcuts:
         return _buildShortcutsPage();
       case _SettingsPage.developerOptions:
@@ -3788,6 +3817,246 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildAccountsPage() {
+    return ListView(
+      key: const ValueKey<String>('accountManagementPage'),
+      padding: const EdgeInsets.all(10),
+      children: <Widget>[
+        _SettingsSection(
+          icon: Icons.manage_accounts_outlined,
+          title: '本地账户',
+          description: '账户是本地身份壳，数据按账户隔离。账户本身不会进入存档，切换账户即切换整套本地数据。',
+          children: <Widget>[
+            if (_accounts.isEmpty && !_accountsLoading)
+              const _SettingsInfoTile(
+                icon: Icons.person_off_outlined,
+                title: '暂无账户',
+                description: '点击“新建账户”创建第一个本地账户。',
+              ),
+            if (_accountsLoading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: LinearProgressIndicator(),
+              ),
+            for (final account in _accounts)
+              _AccountTile(
+                account: account,
+                active: account.id == _activeAccountId,
+                busy: _accountBusy,
+                onSwitch: account.id == _activeAccountId
+                    ? null
+                    : () => _switchAccountInSettings(account),
+                onRename: () => _renameAccountInSettings(account),
+                onDelete:
+                    account.id == _activeAccountId || _accounts.length <= 1
+                    ? null
+                    : () => _deleteAccountInSettings(account),
+              ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: FilledButton.tonalIcon(
+                key: const ValueKey<String>('accountCreateButton'),
+                onPressed: _accountBusy ? null : _createAccountInSettings,
+                icon: const Icon(Icons.add),
+                label: const Text('新建账户'),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Future<void> _loadAccounts() async {
+    final repository = widget.accountRepository;
+    if (repository == null) {
+      return;
+    }
+    setState(() => _accountsLoading = true);
+    try {
+      final accounts = await repository.listAccounts();
+      final activeId = await repository.activeAccountId();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _accounts = accounts;
+        _activeAccountId = activeId;
+      });
+    } catch (error) {
+      _logger.warning('accounts.list_failed', component: 'settings', error: error);
+    } finally {
+      if (mounted) {
+        setState(() => _accountsLoading = false);
+      }
+    }
+  }
+
+  Future<void> _createAccountInSettings() async {
+    final repository = widget.accountRepository;
+    if (repository == null) {
+      return;
+    }
+    final name = await _promptAccountName(title: '新建账户', initial: '');
+    if (name == null || name.trim().isEmpty || !mounted) {
+      return;
+    }
+    setState(() => _accountBusy = true);
+    try {
+      await repository.createAccount(name);
+      await _loadAccounts();
+      await widget.onAccountsChanged?.call();
+    } catch (error) {
+      if (mounted) {
+        showTopNotice(context, '创建账户失败：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _accountBusy = false);
+      }
+    }
+  }
+
+  Future<void> _renameAccountInSettings(LocalAccount account) async {
+    final repository = widget.accountRepository;
+    if (repository == null) {
+      return;
+    }
+    final name = await _promptAccountName(
+      title: '重命名账户',
+      initial: account.displayName,
+    );
+    if (name == null || name.trim().isEmpty || !mounted) {
+      return;
+    }
+    setState(() => _accountBusy = true);
+    try {
+      await repository.renameAccount(account.id, name);
+      await _loadAccounts();
+      await widget.onAccountsChanged?.call();
+    } catch (error) {
+      if (mounted) {
+        showTopNotice(context, '重命名账户失败：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _accountBusy = false);
+      }
+    }
+  }
+
+  Future<void> _deleteAccountInSettings(LocalAccount account) async {
+    final repository = widget.accountRepository;
+    if (repository == null) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除账户'),
+        content: Text(
+          '删除账户“${account.displayName}”会同时删除其本地数据（设置、角色草稿、会话缓存和媒体），且无法恢复。确定继续吗？',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey<String>('accountDeleteConfirm'),
+            style: FilledButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    setState(() => _accountBusy = true);
+    try {
+      await repository.deleteAccount(account.id);
+      await _loadAccounts();
+      await widget.onAccountsChanged?.call();
+    } catch (error) {
+      if (mounted) {
+        showTopNotice(context, '删除账户失败：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _accountBusy = false);
+      }
+    }
+  }
+
+  Future<void> _switchAccountInSettings(LocalAccount account) async {
+    final repository = widget.accountRepository;
+    if (repository == null) {
+      return;
+    }
+    setState(() => _accountBusy = true);
+    try {
+      final onSwitched = widget.onAccountSwitched;
+      if (onSwitched != null) {
+        await onSwitched(account.id);
+      } else {
+        await repository.setActiveAccount(account.id);
+      }
+      await _loadAccounts();
+      if (mounted && onSwitched != null && _activeAccountId == account.id) {
+        Navigator.of(context).pop();
+      }
+    } catch (error) {
+      if (mounted) {
+        showTopNotice(context, '切换账户失败：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _accountBusy = false);
+      }
+    }
+  }
+
+  Future<String?> _promptAccountName({
+    required String title,
+    required String initial,
+  }) async {
+    final controller = TextEditingController(text: initial);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          key: const ValueKey<String>('accountNameField'),
+          controller: controller,
+          autofocus: true,
+          maxLength: 40,
+          decoration: const InputDecoration(
+            labelText: '账户名称',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey<String>('accountNameConfirm'),
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return result;
+  }
+
   Widget _buildUserProfilePage() {
     final selectedRole = _selectedUserRole;
     return ListView(
@@ -5878,6 +6147,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return '会话默认值';
       case _SettingsPage.userProfile:
         return '用户角色';
+      case _SettingsPage.accounts:
+        return '账户管理';
       case _SettingsPage.shortcuts:
         return '快捷键';
       case _SettingsPage.developerOptions:
@@ -5909,6 +6180,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return _SettingsPage.sessionDefaults;
       case SettingsInitialPage.userProfile:
         return _SettingsPage.userProfile;
+      case SettingsInitialPage.accounts:
+        return _SettingsPage.accounts;
       case SettingsInitialPage.shortcuts:
         return _SettingsPage.shortcuts;
       case SettingsInitialPage.developerOptions:
@@ -5934,6 +6207,7 @@ enum _SettingsPage {
   tts,
   sessionDefaults,
   userProfile,
+  accounts,
   assistantManagement,
   gensokyoAi,
   shortcuts,
@@ -5943,13 +6217,76 @@ enum _SettingsPage {
   about,
 }
 
+class _AccountTile extends StatelessWidget {
+  const _AccountTile({
+    required this.account,
+    required this.active,
+    required this.busy,
+    this.onSwitch,
+    this.onRename,
+    this.onDelete,
+  });
+
+  final LocalAccount account;
+  final bool active;
+  final bool busy;
+  final VoidCallback? onSwitch;
+  final VoidCallback? onRename;
+  final VoidCallback? onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Card(
+      elevation: active ? 2 : 0,
+      color: active
+          ? colorScheme.primaryContainer
+          : colorScheme.surfaceContainerHighest,
+      child: ListTile(
+        leading: CircleAvatar(
+          child: Icon(active ? Icons.person : Icons.person_outline),
+        ),
+        title: Text(
+          account.displayName.isEmpty ? '未命名账户' : account.displayName,
+        ),
+        subtitle: Text(active ? '当前账户' : '切换后加载该账户的本地数据'),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            if (active)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Icon(Icons.check_circle_outline),
+              )
+            else
+              TextButton(
+                key: ValueKey<String>('accountSwitch_${account.id}'),
+                onPressed: busy ? null : onSwitch,
+                child: const Text('切换'),
+              ),
+            IconButton(
+              tooltip: '重命名',
+              onPressed: busy ? null : onRename,
+              icon: const Icon(Icons.edit_outlined, size: 18),
+            ),
+            IconButton(
+              tooltip: '删除',
+              onPressed: busy || onDelete == null ? null : onDelete,
+              icon: const Icon(Icons.delete_outline, size: 18),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _AssistantManagementTile extends StatelessWidget {
   const _AssistantManagementTile({
     required this.assistant,
     this.onEdit,
     this.onDelete,
   });
-
   final Assistant assistant;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;

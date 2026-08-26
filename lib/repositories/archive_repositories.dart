@@ -12,7 +12,9 @@ import '../models/chat_session.dart';
 import '../services/app_logger.dart';
 
 class ArchivePaths {
-  ArchivePaths({Directory? root}) : root = root ?? _defaultRoot();
+  ArchivePaths({Directory? root, Directory? globalRoot})
+    : root = root ?? _defaultRoot(),
+      _globalRoot = globalRoot;
 
   /// Resolves the platform application directory before repositories are
   /// created. Android's current directory is `/`, which is read-only.
@@ -36,7 +38,33 @@ class ArchivePaths {
     }
   }
 
+  /// The account data root: assistants, conversations, media, appearance,
+  /// archives and this account's `settings.json` live here.
   final Directory root;
+
+  final Directory? _globalRoot;
+
+  /// The shared application root holding `accounts.json`, per-account
+  /// directories and shared diagnostic logs. Defaults to [root] when no
+  /// explicit global root is provided (for backwards compatibility and
+  /// tests).
+  Directory get globalRoot => _globalRoot ?? root;
+
+  Directory get accountsDir => Directory(_join(globalRoot.path, 'accounts'));
+
+  File get accountsFile => File(_join(globalRoot.path, 'accounts.json'));
+
+  /// This account's settings file, scoped to [root].
+  File get settingsFile => File(_join(root.path, 'settings.json'));
+
+  /// Builds the [ArchivePaths] for a single local account, whose data is
+  /// isolated under `accounts/<accountId>` within [globalRoot].
+  ArchivePaths forAccount(String accountId) {
+    return ArchivePaths(
+      root: Directory(_join(accountsDir.path, _canonicalAccountId(accountId))),
+      globalRoot: globalRoot,
+    );
+  }
 
   Directory get assistantsDir => Directory(_join(root.path, 'assistants'));
 
@@ -45,7 +73,7 @@ class ArchivePaths {
 
   Directory get archivesDir => Directory(_join(root.path, 'archives'));
 
-  Directory get logsDir => Directory(_join(root.path, 'logs'));
+  Directory get logsDir => Directory(_join(globalRoot.path, 'logs'));
 
   Directory get appearanceDir => Directory(_join(root.path, 'appearance'));
 
@@ -181,6 +209,34 @@ class ArchivePaths {
       );
     }
     return conversationId;
+  }
+
+  static String _canonicalAccountId(String accountId) {
+    final isAbsolute =
+        accountId.startsWith('/') ||
+        accountId.startsWith('\\') ||
+        RegExp(r'^[A-Za-z]:').hasMatch(accountId);
+    final hasForbiddenCharacter = RegExp(
+      r'[<>:"/\\|?*\x00-\x1F]',
+    ).hasMatch(accountId);
+    final isReservedDeviceName = RegExp(
+      r'^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)',
+      caseSensitive: false,
+    ).hasMatch(accountId);
+    if (accountId.isEmpty ||
+        isAbsolute ||
+        accountId == '..' ||
+        hasForbiddenCharacter ||
+        accountId.endsWith('.') ||
+        accountId.endsWith(' ') ||
+        isReservedDeviceName) {
+      throw ArgumentError.value(
+        accountId,
+        'accountId',
+        'Must be a valid directory name',
+      );
+    }
+    return accountId;
   }
 }
 
